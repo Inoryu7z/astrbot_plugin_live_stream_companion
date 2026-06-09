@@ -1,0 +1,362 @@
+# -*- coding: utf-8 -*-
+from __future__ import annotations
+
+import inspect
+import json
+import os
+from pathlib import Path
+from typing import Any
+
+
+class PageConfigManager:
+    """拓展页配置读写与运行时同步。"""
+
+    def __init__(self, plugin: Any, plugin_name: str, logger: Any) -> None:
+        self.plugin = plugin
+        self.plugin_name = plugin_name
+        self.logger = logger
+
+    def schema_payload(self) -> dict[str, Any]:
+        schema = self.read_schema()
+        keys = self.editable_keys()
+        return {
+            "schema": {key: schema.get(key, {}) for key in keys},
+            "values": self.values(keys),
+            "groups": self.groups(),
+        }
+
+    def summary(self) -> dict[str, Any]:
+        return self.values(self.editable_keys())
+
+    def values(self, keys: list[str]) -> dict[str, Any]:
+        schema = self.read_schema()
+        return {
+            key: self.plugin.config.get(key, schema.get(key, {}).get("default"))
+            for key in keys
+        }
+
+    def build_updates(self, values: dict[str, Any]) -> dict[str, Any]:
+        schema = self.read_schema()
+        editable_keys = set(self.editable_keys())
+        updates: dict[str, Any] = {}
+        for key, value in values.items():
+            if key not in editable_keys or key not in schema:
+                continue
+            updates[key] = self.coerce_value(value, schema[key])
+        return updates
+
+    async def apply_updates(self, updates: dict[str, Any]) -> bool:
+        subtitle_before = self.subtitle_snapshot()
+        for key, value in updates.items():
+            self.plugin.config[key] = value
+        persisted = await self.persist()
+        await self.sync_runtime_after_change(subtitle_before)
+        return persisted
+
+    def read_schema(self) -> dict[str, Any]:
+        path = Path(__file__).with_name("_conf_schema.json")
+        try:
+            with path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+            return data if isinstance(data, dict) else {}
+        except Exception as exc:
+            self.logger.warning(f"[B站直播] 读取配置 schema 失败: {exc}")
+            return {}
+
+    async def persist(self) -> bool:
+        config = self.plugin.config
+        for name in ("save", "save_config", "dump", "flush"):
+            method = getattr(config, name, None)
+            if not callable(method):
+                continue
+            try:
+                result = method()
+                if inspect.isawaitable(result):
+                    await result
+                return True
+            except TypeError:
+                continue
+            except Exception as exc:
+                self.logger.debug(f"[B站直播] 调用配置保存方法 {name} 失败: {exc}")
+
+        path = Path(os.path.expanduser("~")) / ".astrbot" / "data" / "config" / f"{self.plugin_name}_config.json"
+        try:
+            existing: dict[str, Any] = {}
+            if path.exists():
+                with path.open("r", encoding="utf-8") as handle:
+                    loaded = json.load(handle)
+                if isinstance(loaded, dict):
+                    existing = loaded
+            try:
+                existing.update(dict(config))
+            except Exception:
+                existing.update(self.summary())
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("w", encoding="utf-8") as handle:
+                json.dump(existing, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+            return True
+        except Exception as exc:
+            self.logger.warning(f"[B站直播] 写入插件配置文件失败: {exc}")
+            return False
+
+    def subtitle_snapshot(self) -> dict[str, Any]:
+        return {
+            key: self.plugin.config.get(key)
+            for key in self.editable_keys()
+            if key.startswith("subtitle_")
+        }
+
+    async def sync_runtime_after_change(self, subtitle_before: dict[str, Any]) -> None:
+        subtitle_after = self.subtitle_snapshot()
+        if subtitle_before == subtitle_after:
+            return
+        server = getattr(self.plugin, "_subtitle_server", None)
+        subtitle_enabled = bool(self.plugin.config.get("subtitle_enabled", False))
+        if subtitle_enabled:
+            if server is None:
+                await self.plugin._start_subtitle_server_if_enabled()
+            else:
+                host = str(self.plugin.config.get("subtitle_host") or "127.0.0.1")
+                port = self._int(self.plugin.config.get("subtitle_port"), 18081)
+                if getattr(server, "host", "") != host or getattr(server, "port", 0) != port:
+                    await self.plugin._stop_subtitle_server()
+                    await self.plugin._start_subtitle_server_if_enabled()
+                else:
+                    server.style = self.plugin._get_subtitle_style()
+        elif server is not None:
+            await self.plugin._stop_subtitle_server()
+
+    @staticmethod
+    def editable_keys() -> list[str]:
+        return [
+            "bilibili_enabled",
+            "bilibili_type",
+            "bilibili_room_id",
+            "bilibili_web_backend",
+            "laplace_event_bridge_url",
+            "laplace_event_bridge_token",
+            "bilibili_sessdata",
+            "bili_live_inject_enabled",
+            "bili_live_inject_max_events",
+            "bili_live_cache_size",
+            "bili_live_log_events",
+            "bili_live_debug_log",
+            "bili_live_auto_reply_enabled",
+            "bili_live_auto_reply_mode",
+            "bili_live_auto_reply_session_id",
+            "bili_live_auto_reply_cooldown_seconds",
+            "bili_live_auto_reply_max_per_minute",
+            "bili_live_auto_reply_min_events",
+            "bili_live_auto_reply_max_events",
+            "bili_live_auto_reply_max_length",
+            "bili_live_auto_reply_force_full_tts",
+            "bili_live_auto_reply_system_prompt",
+            "live_memory_enabled",
+            "live_memory_context_enabled",
+            "live_memory_context_max_lines",
+            "live_memory_max_items",
+            "live_memory_topic_enabled",
+            "live_memory_max_topics",
+            "live_memory_max_open_threads",
+            "live_memory_max_highlights",
+            "private_companion_live_context_enabled",
+            "private_companion_live_context_max_age_seconds",
+            "private_companion_live_context_recent_limit",
+            "private_companion_live_context_max_users",
+            "private_companion_live_context_include_identity_note",
+            "private_companion_relationship_style_context_enabled",
+            "private_companion_relationship_style_include_profile",
+            "private_companion_relationship_style_include_memories",
+            "private_companion_writeback_enabled",
+            "private_companion_viewer_activity_enabled",
+            "private_companion_viewer_activity_context_enabled",
+            "private_companion_auto_register_viewers",
+            "private_companion_auto_register_min_events",
+            "private_companion_live_state_enabled",
+            "private_companion_live_state_cooldown_seconds",
+            "private_companion_live_state_duration_hours",
+            "private_companion_live_summary_enabled",
+            "subtitle_enabled",
+            "subtitle_host",
+            "subtitle_port",
+            "subtitle_typing_speed_ms",
+            "subtitle_hold_seconds",
+            "subtitle_max_length",
+            "subtitle_font_size",
+            "subtitle_font_weight",
+            "subtitle_text_color",
+            "subtitle_stroke_color",
+            "subtitle_stroke_size",
+            "subtitle_cursor_color",
+            "subtitle_show_cursor",
+            "subtitle_fade_out",
+            "subtitle_position",
+            "subtitle_padding",
+            "subtitle_max_width",
+            "subtitle_strip_l2d_tags",
+            "subtitle_strip_tts_blocks",
+            "subtitle_voice_use_following_plain",
+            "subtitle_prefer_chinese_text",
+            "subtitle_strip_html_tags",
+            "mouth_sync_enabled",
+            "mouth_sync_open_parameter",
+            "mouth_sync_form_parameter",
+            "mouth_sync_fps",
+            "mouth_sync_gain",
+            "mouth_sync_smoothing",
+            "mouth_sync_noise_gate",
+            "mouth_sync_form_strength",
+            "mouth_sync_mode",
+        ]
+
+    @staticmethod
+    def groups() -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "live",
+                "title": "直播监听",
+                "description": "房间、后端和事件缓存。",
+                "keys": [
+                    "bilibili_enabled",
+                    "bilibili_type",
+                    "bilibili_room_id",
+                    "bilibili_web_backend",
+                    "laplace_event_bridge_url",
+                    "laplace_event_bridge_token",
+                    "bilibili_sessdata",
+                    "bili_live_inject_enabled",
+                    "bili_live_inject_max_events",
+                    "bili_live_cache_size",
+                    "bili_live_log_events",
+                    "bili_live_debug_log",
+                ],
+            },
+            {
+                "id": "reply",
+                "title": "自动回应",
+                "description": "触发频率、限流和提示词。",
+                "keys": [
+                    "bili_live_auto_reply_enabled",
+                    "bili_live_auto_reply_mode",
+                    "bili_live_auto_reply_session_id",
+                    "bili_live_auto_reply_cooldown_seconds",
+                    "bili_live_auto_reply_max_per_minute",
+                    "bili_live_auto_reply_min_events",
+                    "bili_live_auto_reply_max_events",
+                    "bili_live_auto_reply_max_length",
+                    "bili_live_auto_reply_force_full_tts",
+                    "bili_live_auto_reply_system_prompt",
+                ],
+            },
+            {
+                "id": "memory",
+                "title": "记忆与陪伴",
+                "description": "直播专用记忆、关系网线索和下播小结。",
+                "keys": [
+                    "live_memory_enabled",
+                    "live_memory_context_enabled",
+                    "live_memory_context_max_lines",
+                    "live_memory_max_items",
+                    "live_memory_topic_enabled",
+                    "live_memory_max_topics",
+                    "live_memory_max_open_threads",
+                    "live_memory_max_highlights",
+                    "private_companion_live_context_enabled",
+                    "private_companion_live_context_max_age_seconds",
+                    "private_companion_live_context_recent_limit",
+                    "private_companion_live_context_max_users",
+                    "private_companion_live_context_include_identity_note",
+                    "private_companion_relationship_style_context_enabled",
+                    "private_companion_relationship_style_include_profile",
+                    "private_companion_relationship_style_include_memories",
+                    "private_companion_writeback_enabled",
+                    "private_companion_viewer_activity_enabled",
+                    "private_companion_viewer_activity_context_enabled",
+                    "private_companion_auto_register_viewers",
+                    "private_companion_auto_register_min_events",
+                    "private_companion_live_state_enabled",
+                    "private_companion_live_state_cooldown_seconds",
+                    "private_companion_live_state_duration_hours",
+                    "private_companion_live_summary_enabled",
+                ],
+            },
+            {
+                "id": "subtitle",
+                "title": "打字机字幕",
+                "description": "OBS overlay 样式、清理规则和页面预览。",
+                "keys": [
+                    "subtitle_enabled",
+                    "subtitle_host",
+                    "subtitle_port",
+                    "subtitle_typing_speed_ms",
+                    "subtitle_hold_seconds",
+                    "subtitle_max_length",
+                    "subtitle_font_size",
+                    "subtitle_font_weight",
+                    "subtitle_text_color",
+                    "subtitle_stroke_color",
+                    "subtitle_stroke_size",
+                    "subtitle_cursor_color",
+                    "subtitle_show_cursor",
+                    "subtitle_fade_out",
+                    "subtitle_position",
+                    "subtitle_padding",
+                    "subtitle_max_width",
+                    "subtitle_strip_l2d_tags",
+                    "subtitle_strip_tts_blocks",
+                    "subtitle_voice_use_following_plain",
+                    "subtitle_prefer_chinese_text",
+                    "subtitle_strip_html_tags",
+                ],
+            },
+            {
+                "id": "stage",
+                "title": "嘴型联动",
+                "description": "TTS 音量包络到 VTS 参数。",
+                "keys": [
+                    "mouth_sync_enabled",
+                    "mouth_sync_open_parameter",
+                    "mouth_sync_form_parameter",
+                    "mouth_sync_fps",
+                    "mouth_sync_gain",
+                    "mouth_sync_smoothing",
+                    "mouth_sync_noise_gate",
+                    "mouth_sync_form_strength",
+                    "mouth_sync_mode",
+                ],
+            },
+        ]
+
+    @staticmethod
+    def coerce_value(value: Any, meta: dict[str, Any]) -> Any:
+        value_type = str(meta.get("type") or "string")
+        if value_type == "bool":
+            if isinstance(value, str):
+                return value.strip().lower() in {"1", "true", "yes", "on", "开启"}
+            return bool(value)
+        if value_type == "int":
+            return PageConfigManager._int(value, PageConfigManager._int(meta.get("default")))
+        if value_type == "float":
+            return PageConfigManager._float(value, PageConfigManager._float(meta.get("default")))
+        if value_type == "list":
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+            return [item.strip() for item in str(value or "").split(",") if item.strip()]
+        if value_type == "text":
+            return str(value or "")
+        return str(value or "")
+
+    @staticmethod
+    def _int(value: Any, default: int = 0) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default

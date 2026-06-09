@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>我会直播圈米养你</title>
+  <link rel="stylesheet" href="./app.css?v=20260610-live-page4" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>我会直播圈米养你</h1>
+        <p id="subtitle">读取直播链路中...</p>
+      </div>
+      <div class="top-actions">
+        <button id="startBtn" type="button">启动监听</button>
+        <button id="stopBtn" type="button">停止监听</button>
+        <button id="refreshBtn" class="icon-button" title="刷新" aria-label="刷新">↻</button>
+      </div>
+    </header>
+
+    <section class="stats" id="stats"></section>
+
+    <section class="layout">
+      <nav class="tabs" aria-label="直播面板视图">
+        <button class="tab is-active" data-tab="dashboard">总览</button>
+        <button class="tab" data-tab="memory">直播记忆</button>
+        <button class="tab" data-tab="viewers">观众画像</button>
+        <button class="tab" data-tab="events">最近事件</button>
+        <button class="tab" data-tab="config">配置</button>
+      </nav>
+
+      <section class="panel is-active" id="panel-dashboard">
+        <div class="dashboard-grid">
+          <article class="wide">
+            <div class="section-head">
+              <h2>直播链路</h2>
+              <span id="liveBadge" class="badge">--</span>
+            </div>
+            <div id="liveFlow" class="flow"></div>
+          </article>
+          <article>
+            <h2>自动回应</h2>
+            <div id="autoReplyPanel" class="metric-list"></div>
+          </article>
+          <article>
+            <h2>演出层</h2>
+            <div id="stagePanel" class="metric-list"></div>
+          </article>
+          <article class="wide">
+            <h2>本场活跃观众</h2>
+            <div id="topViewers" class="viewer-strip"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-memory">
+        <div class="section-head">
+          <h2>直播专用记忆</h2>
+          <button id="memoryRefreshBtn" type="button">刷新记忆</button>
+        </div>
+        <div id="memoryOverview" class="memory-overview"></div>
+        <div class="memory-grid">
+          <article>
+            <h2>可承接记忆</h2>
+            <div id="memoryItems" class="card-list"></div>
+          </article>
+          <article>
+            <h2>最近高光</h2>
+            <div id="highlightItems" class="card-list"></div>
+          </article>
+          <article>
+            <h2>常见话题</h2>
+            <div id="topicItems" class="topic-cloud"></div>
+          </article>
+          <article>
+            <h2>未完话题</h2>
+            <div id="threadItems" class="card-list"></div>
+          </article>
+          <article class="wide">
+            <h2>直播小结</h2>
+            <div id="summaryItems" class="card-list"></div>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-viewers">
+        <div class="section-head">
+          <h2>观众活跃度画像</h2>
+          <input id="viewerFilter" type="search" placeholder="筛选观众名" />
+        </div>
+        <div id="viewerRows" class="viewer-grid"></div>
+      </section>
+
+      <section class="panel" id="panel-events">
+        <div class="section-head">
+          <h2>最近直播事件</h2>
+          <span id="eventCount" class="muted"></span>
+        </div>
+        <div id="eventRows" class="timeline"></div>
+      </section>
+
+      <section class="panel" id="panel-config">
+        <div class="section-head config-head">
+          <div>
+            <h2>拓展页配置</h2>
+            <p class="muted">常用直播、自动回应、记忆和嘴型参数可直接在这里调整。</p>
+            <p id="configStatus" class="config-status muted"></p>
+          </div>
+          <div class="config-actions">
+            <span id="configDirtyBadge" class="badge idle" hidden>未保存</span>
+            <a class="button-link" href="./subtitle.html">打字机字幕</a>
+            <button id="resetConfigBtn" type="button">还原</button>
+            <button id="saveConfigBtn" class="primary" type="button">保存配置</button>
+          </div>
+        </div>
+
+        <div id="configEditor" class="config-editor"></div>
+      </section>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="./page_bridge.js?v=20260610-live-page5"></script>
+  <script src="./config_model.js?v=20260610-live-page3"></script>
+  <script src="./config_form.js?v=20260610-live-page4"></script>
+  <script src="./app.js?v=20260610-live-page5"></script>
+</body>
+</html>

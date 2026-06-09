@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>打字机字幕配置</title>
+  <link rel="stylesheet" href="./app.css?v=20260610-live-page6" />
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>打字机字幕</h1>
+        <p id="subtitle">配置 OBS overlay 样式并即时预览。</p>
+      </div>
+      <div class="top-actions">
+        <a class="button-link" href="./index.html">返回直播面板</a>
+        <button id="refreshBtn" class="icon-button" title="刷新" aria-label="刷新">↻</button>
+      </div>
+    </header>
+
+    <section class="layout standalone-layout">
+      <section class="panel is-active">
+        <div class="section-head config-head">
+          <div>
+            <h2>字幕配置</h2>
+            <p class="muted">这里单独管理打字机字幕服务、样式、清理规则和预览。</p>
+            <p id="configStatus" class="config-status muted"></p>
+          </div>
+          <div class="config-actions">
+            <span id="configDirtyBadge" class="badge idle" hidden>未保存</span>
+            <button id="resetConfigBtn" type="button">还原</button>
+            <button id="saveConfigBtn" class="primary" type="button">保存配置</button>
+          </div>
+        </div>
+
+        <div class="subtitle-workbench">
+          <section class="subtitle-preview-panel">
+            <h2>预览</h2>
+            <div id="subtitlePreviewStage" class="subtitle-stage subtitle-stage-large" aria-live="polite">
+              <div class="subtitle-frame">
+                <span id="subtitlePreviewText"></span>
+              </div>
+            </div>
+            <label class="field-block">
+              <span>预览文本</span>
+              <textarea id="previewText" rows="4">谢谢喜欢，今天也一起把直播间热起来吧。</textarea>
+            </label>
+            <div class="preview-actions">
+              <button id="previewBtn" class="primary" type="button">发送到字幕 overlay</button>
+              <button id="replayPreviewBtn" type="button">重播页面预览</button>
+            </div>
+          </section>
+
+          <div id="configEditor" class="config-editor"></div>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" hidden></div>
+  <script src="./page_bridge.js?v=20260610-live-page5"></script>
+  <script src="./config_model.js?v=20260610-live-page3"></script>
+  <script src="./config_form.js?v=20260610-live-page4"></script>
+  <script src="./subtitle.js?v=20260610-live-page5"></script>
+</body>
+</html>

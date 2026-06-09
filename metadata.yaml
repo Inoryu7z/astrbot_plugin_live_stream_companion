@@ -1,0 +1,43 @@
+name: astrbot_plugin_live_stream_companion
+display_name: 我会直播圈米养你
+author: menglimi
+author_url: https://github.com/menglimi
+description: astrbot_plugin_live_stream_companion 是面向 AstrBot 的直播陪伴、弹幕互动与 Live2D 演出控制插件。它把 B 站直播弹幕读取、LLM 自动回应、VTube Studio 表情动作、TTS 嘴型联动和 OBS 字幕层组织成一套直播间互动体验。
+desc: 为 AstrBot 提供 B 站直播弹幕读取、自动回应、Live2D 表情动作、OBS 字幕和 TTS 嘴型联动的直播陪伴插件。
+repo: https://github.com/menglimi/astrbot_plugin_live_stream_companion
+category: 娱乐
+tags:
+  - 直播
+  - B站弹幕
+  - Live2D
+  - VTube Studio
+  - 字幕
+  - 嘴型联动
+help: |
+  VTube Studio:
+  - /vts_auth 认证 VTube Studio
+  - /vts_status 查看连接状态和当前模型
+  - /vts_discover 重新扫描并自动发现 VTS 地址
+  - /vts_list 列出所有热键和表情
+  - /vts_l2d_list 查看当前启用的自主 L2D 标签
+
+  B 站直播:
+  - /bili_live_start <房间号> 启动 B 站直播弹幕监听
+  - /bili_live_stop 停止 B 站直播弹幕监听
+  - /bili_live_status 查看弹幕监听状态
+  - /bili_live_recent [数量] 查看最近缓存的直播事件
+  - /bili_live_memory [数量] 查看直播专用记忆上下文
+  - /bili_live_bind_here 将当前聊天绑定为直播弹幕自动回应输出会话
+  - 拓展页：插件详情页中打开“直播面板”，查看直播状态、记忆、观众画像和最近事件
+
+  字幕与嘴型:
+  - /subtitle_status 查看字幕 overlay 状态
+  - /subtitle_test [文本] 测试打字机字幕
+  - /subtitle_clear 清空字幕 overlay
+  - /mouth_sync_test 2 测试嘴型联动
+
+  初次使用建议先发送 /vts_auth 完成 VTube Studio 授权，再通过 /vts_status 和 /vts_list 检查模型热键。直播弹幕可使用 /bili_live_start <房间号> 临时启动；需要自动回应时，先发送 /bili_live_bind_here，再开启 bili_live_auto_reply_enabled。OBS 字幕默认地址为 http://127.0.0.1:18081/。
+version: 1.4.4
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.16,<5"
