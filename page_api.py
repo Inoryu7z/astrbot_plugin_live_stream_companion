@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
+import base64
+import hashlib
+import json
+import os
+import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
@@ -33,6 +40,8 @@ class LiveStreamCompanionPageApi:
             ("/subtitle/preview", self.preview_subtitle, ["POST"], "Live Stream Companion subtitle preview"),
             ("/control/start", self.start_live, ["POST"], "Live Stream Companion start live"),
             ("/control/stop", self.stop_live, ["POST"], "Live Stream Companion stop live"),
+            ("/control/obs/status", self.get_obs_control_status, ["GET"], "Live Stream Companion OBS control status"),
+            ("/control/obs/action", self.obs_control_action, ["POST"], "Live Stream Companion OBS control action"),
         ]
         for path, handler, methods, desc in routes:
             register(f"{PAGE_API_PREFIX}{path}", handler, methods, desc)
@@ -49,9 +58,10 @@ class LiveStreamCompanionPageApi:
                     "plugin": {
                         "name": PLUGIN_NAME,
                         "display_name": "我会直播圈米养你",
-                        "version": "1.4.3",
+                        "version": "1.5.0",
                     },
                     "live": self._live_summary(events, session_events),
+                    "obs_control": await self._obs_control_status(check_obs_ws=True),
                     "vts": self._vts_summary(),
                     "subtitle": self._subtitle_summary(),
                     "mouth_sync": self._mouth_sync_summary(),
@@ -154,6 +164,289 @@ class LiveStreamCompanionPageApi:
         except Exception as exc:
             logger.warning(f"[B站直播] 拓展页停止监听失败: {exc}")
             return self._error(str(exc))
+
+    async def get_obs_control_status(self) -> dict[str, Any]:
+        try:
+            return self._ok(await self._obs_control_status(check_obs_ws=True))
+        except Exception as exc:
+            logger.warning(f"[B站直播] OBS 控制状态读取失败: {exc}")
+            return self._error(str(exc))
+
+    async def obs_control_action(self) -> dict[str, Any]:
+        payload = await request.get_json(silent=True) or {}
+        action = self._single_line(payload.get("action"), 40)
+        if not action:
+            return self._error("缺少 OBS 控制动作")
+        if not bool(self.plugin.config.get("obs_control_enabled", False)):
+            return self._error("OBS 开播控制未启用")
+        try:
+            messages: list[str] = []
+            if action == "open_obs":
+                messages.append(self._start_configured_app("obs"))
+            elif action == "open_l2dstudio":
+                messages.append(self._start_configured_app("l2dstudio"))
+            elif action == "start_apps":
+                messages.append(self._start_configured_app("obs"))
+                messages.append(self._start_configured_app("l2dstudio"))
+            elif action == "check":
+                pass
+            elif action == "debug":
+                messages.append(self._start_configured_app("obs"))
+                messages.append(self._start_configured_app("l2dstudio"))
+                wait_seconds = max(0, min(20, self._int(self.plugin.config.get("obs_startup_wait_seconds"), 3)))
+                if wait_seconds:
+                    await asyncio.sleep(wait_seconds)
+                scene = self._single_line(self.plugin.config.get("obs_live_scene_name"), 120)
+                if scene:
+                    await self._obs_request("SetCurrentProgramScene", {"sceneName": scene})
+                    messages.append(f"OBS 已切换到场景：{scene}")
+                if bool(self.plugin.config.get("obs_debug_start_virtual_camera", True)):
+                    try:
+                        await self._obs_request("StartVirtualCam")
+                        messages.append("OBS 虚拟摄像机已开启")
+                    except Exception as exc:
+                        messages.append(f"OBS 虚拟摄像机未重复开启：{self._single_line(exc, 80)}")
+            elif action == "switch_scene":
+                scene = self._single_line(payload.get("scene") or self.plugin.config.get("obs_live_scene_name"), 120)
+                if not scene:
+                    return self._error("未配置 OBS 场景名")
+                await self._obs_request("SetCurrentProgramScene", {"sceneName": scene})
+                messages.append(f"OBS 已切换到场景：{scene}")
+            elif action == "start_virtual_camera":
+                await self._obs_request("StartVirtualCam")
+                messages.append("OBS 虚拟摄像机已开启")
+            elif action == "stop_virtual_camera":
+                await self._obs_request("StopVirtualCam")
+                messages.append("OBS 虚拟摄像机已关闭")
+            elif action == "start_record":
+                await self._obs_request("StartRecord")
+                messages.append("OBS 录制已开始")
+            elif action == "stop_record":
+                await self._obs_request("StopRecord")
+                messages.append("OBS 录制已停止")
+            elif action == "start_stream":
+                if not bool(self.plugin.config.get("obs_allow_stream_start", False)):
+                    return self._error("未允许从插件启动推流，请先开启“允许插件开始推流”")
+                if not bool(payload.get("confirm")):
+                    return self._error("开播需要二次确认")
+                scene = self._single_line(payload.get("scene") or self.plugin.config.get("obs_live_scene_name"), 120)
+                if scene:
+                    await self._obs_request("SetCurrentProgramScene", {"sceneName": scene})
+                    messages.append(f"OBS 已切换到场景：{scene}")
+                await self._obs_request("StartStream")
+                messages.append("OBS 推流已开始")
+            elif action == "stop_stream":
+                await self._obs_request("StopStream")
+                messages.append("OBS 推流已停止")
+            else:
+                return self._error(f"未知 OBS 控制动作：{action}")
+            return self._ok(
+                {
+                    "message": "；".join(item for item in messages if item) or "OBS 控制检查完成",
+                    "obs_control": await self._obs_control_status(check_obs_ws=True),
+                }
+            )
+        except Exception as exc:
+            logger.warning(f"[B站直播] OBS 控制动作失败: {exc}")
+            return self._error(str(exc))
+
+    async def _obs_control_status(self, *, check_obs_ws: bool = True) -> dict[str, Any]:
+        settings = self._obs_control_settings()
+        obs_process = self._configured_app_process_status("obs")
+        l2d_process = self._configured_app_process_status("l2dstudio")
+        obs = {
+            "configured": bool(settings.get("obs_exe_path")),
+            "running": obs_process.get("running", False),
+            "process": obs_process,
+            "websocket": {
+                "configured": bool(settings.get("obs_ws_host") and settings.get("obs_ws_port")),
+                "connected": False,
+                "error": "",
+            },
+            "current_scene": "",
+            "streaming": False,
+            "recording": False,
+            "virtual_camera": False,
+        }
+        if check_obs_ws and obs["websocket"]["configured"] and obs["running"]:
+            try:
+                responses = await self._obs_requests(
+                    [
+                        ("GetVersion", {}),
+                        ("GetCurrentProgramScene", {}),
+                        ("GetStreamStatus", {}),
+                        ("GetRecordStatus", {}),
+                        ("GetVirtualCamStatus", {}),
+                    ],
+                    timeout=3.0,
+                )
+                obs["websocket"]["connected"] = True
+                version = responses.get("GetVersion", {})
+                obs["websocket"]["obs_version"] = self._single_line(version.get("obsVersion"), 40)
+                obs["websocket"]["websocket_version"] = self._single_line(version.get("obsWebSocketVersion"), 40)
+                scene = responses.get("GetCurrentProgramScene", {})
+                obs["current_scene"] = self._single_line(scene.get("currentProgramSceneName"), 120)
+                obs["streaming"] = bool((responses.get("GetStreamStatus", {}) or {}).get("outputActive"))
+                obs["recording"] = bool((responses.get("GetRecordStatus", {}) or {}).get("outputActive"))
+                obs["virtual_camera"] = bool((responses.get("GetVirtualCamStatus", {}) or {}).get("outputActive"))
+            except Exception as exc:
+                obs["websocket"]["error"] = self._single_line(exc, 180)
+        return {
+            "enabled": bool(self.plugin.config.get("obs_control_enabled", False)),
+            "settings": settings,
+            "obs": obs,
+            "l2dstudio": {
+                "configured": bool(settings.get("l2dstudio_exe_path")),
+                "running": l2d_process.get("running", False),
+                "process": l2d_process,
+            },
+            "safety": {
+                "stream_start_allowed": bool(self.plugin.config.get("obs_allow_stream_start", False)),
+                "stream_start_requires_confirm": True,
+            },
+        }
+
+    def _obs_control_settings(self) -> dict[str, Any]:
+        return {
+            "obs_control_enabled": bool(self.plugin.config.get("obs_control_enabled", False)),
+            "obs_exe_path": self._single_line(self.plugin.config.get("obs_exe_path"), 500),
+            "l2dstudio_exe_path": self._single_line(self.plugin.config.get("l2dstudio_exe_path"), 500),
+            "obs_ws_host": self._single_line(self.plugin.config.get("obs_ws_host") or "127.0.0.1", 120) or "127.0.0.1",
+            "obs_ws_port": self._int(self.plugin.config.get("obs_ws_port"), 4455) or 4455,
+            "obs_live_scene_name": self._single_line(self.plugin.config.get("obs_live_scene_name"), 120),
+            "obs_startup_wait_seconds": max(0, min(20, self._int(self.plugin.config.get("obs_startup_wait_seconds"), 3))),
+            "obs_debug_start_virtual_camera": bool(self.plugin.config.get("obs_debug_start_virtual_camera", True)),
+            "obs_allow_stream_start": bool(self.plugin.config.get("obs_allow_stream_start", False)),
+            "obs_ws_password_configured": bool(str(self.plugin.config.get("obs_ws_password") or "")),
+        }
+
+    def _configured_app_process_status(self, app: str) -> dict[str, Any]:
+        raw_path = self._app_path(app)
+        exe = Path(raw_path).expanduser() if raw_path else None
+        name = exe.name if exe else ""
+        exists = bool(exe and exe.exists())
+        return {
+            "path": str(exe) if exe else "",
+            "name": name,
+            "exists": exists,
+            "running": self._process_name_running(name) if name else False,
+        }
+
+    def _app_path(self, app: str) -> str:
+        if app == "obs":
+            return str(self.plugin.config.get("obs_exe_path") or "").strip()
+        if app == "l2dstudio":
+            return str(self.plugin.config.get("l2dstudio_exe_path") or "").strip()
+        return ""
+
+    def _start_configured_app(self, app: str) -> str:
+        raw_path = self._app_path(app)
+        label = "OBS" if app == "obs" else "L2DStudio"
+        if not raw_path:
+            raise RuntimeError(f"未配置 {label} 程序路径")
+        exe = Path(raw_path).expanduser()
+        if not exe.exists():
+            raise RuntimeError(f"{label} 程序不存在：{exe}")
+        if self._process_name_running(exe.name):
+            return f"{label} 已在运行"
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+        subprocess.Popen(
+            [str(exe)],
+            cwd=str(exe.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            creationflags=creationflags,
+        )
+        return f"{label} 已启动"
+
+    @staticmethod
+    def _process_name_running(name: str) -> bool:
+        process_name = str(name or "").strip()
+        if not process_name:
+            return False
+        try:
+            if os.name == "nt":
+                result = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {process_name}", "/FO", "CSV", "/NH"],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                return process_name.casefold() in (result.stdout or "").casefold()
+            result = subprocess.run(["pgrep", "-f", process_name], capture_output=True, text=True, timeout=3)
+            return result.returncode == 0
+        except Exception:
+            return False
+
+    async def _obs_request(self, request_type: str, request_data: dict[str, Any] | None = None) -> dict[str, Any]:
+        responses = await self._obs_requests([(request_type, request_data or {})], timeout=5.0)
+        return responses.get(request_type, {})
+
+    async def _obs_requests(self, requests: list[tuple[str, dict[str, Any]]], *, timeout: float = 5.0) -> dict[str, Any]:
+        try:
+            import websockets
+        except Exception as exc:
+            raise RuntimeError("缺少 websockets 依赖，无法连接 OBS WebSocket") from exc
+        host = self._single_line(self.plugin.config.get("obs_ws_host") or "127.0.0.1", 120) or "127.0.0.1"
+        port = self._int(self.plugin.config.get("obs_ws_port"), 4455) or 4455
+        password = str(self.plugin.config.get("obs_ws_password") or "")
+        uri = f"ws://{host}:{port}"
+        responses: dict[str, Any] = {}
+        try:
+            connector = websockets.connect(uri, open_timeout=timeout, close_timeout=timeout)
+        except TypeError:
+            connector = websockets.connect(uri)
+        async with connector as ws:
+            hello = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+            hello_data = hello.get("d") if isinstance(hello, dict) else {}
+            auth = hello_data.get("authentication") if isinstance(hello_data, dict) else None
+            identify_data: dict[str, Any] = {"rpcVersion": 1}
+            if isinstance(auth, dict):
+                if not password:
+                    raise RuntimeError("OBS WebSocket 需要密码")
+                secret = base64.b64encode(hashlib.sha256((password + str(auth.get("salt", ""))).encode("utf-8")).digest()).decode()
+                identify_data["authentication"] = base64.b64encode(
+                    hashlib.sha256((secret + str(auth.get("challenge", ""))).encode("utf-8")).digest()
+                ).decode()
+            await ws.send(json.dumps({"op": 1, "d": identify_data}, ensure_ascii=False))
+            while True:
+                packet = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+                if packet.get("op") == 2:
+                    break
+                if packet.get("op") == 9:
+                    raise RuntimeError(self._single_line(packet.get("d"), 180) or "OBS WebSocket 鉴权失败")
+            for index, (request_type, request_data) in enumerate(requests):
+                request_id = f"live-stream-companion-{int(time.time() * 1000)}-{index}"
+                await ws.send(
+                    json.dumps(
+                        {
+                            "op": 6,
+                            "d": {
+                                "requestType": request_type,
+                                "requestId": request_id,
+                                "requestData": request_data or {},
+                            },
+                        },
+                        ensure_ascii=False,
+                    )
+                )
+                while True:
+                    packet = json.loads(await asyncio.wait_for(ws.recv(), timeout=timeout))
+                    if packet.get("op") != 7:
+                        continue
+                    data = packet.get("d") if isinstance(packet.get("d"), dict) else {}
+                    if data.get("requestId") != request_id:
+                        continue
+                    status = data.get("requestStatus") if isinstance(data.get("requestStatus"), dict) else {}
+                    if not status.get("result", False):
+                        comment = self._single_line(status.get("comment"), 180) or request_type
+                        raise RuntimeError(f"OBS 请求失败：{comment}")
+                    responses[request_type] = data.get("responseData") if isinstance(data.get("responseData"), dict) else {}
+                    break
+        return responses
 
     def _live_summary(self, events: list[Any], session_events: list[Any]) -> dict[str, Any]:
         plugin = self.plugin

@@ -18,7 +18,7 @@ document.addEventListener("DOMContentLoaded", () => {
     "memoryOverview", "memoryItems", "highlightItems", "topicItems", "threadItems",
     "summaryItems", "viewerFilter", "viewerRows", "eventCount", "eventRows",
     "configEditor", "saveConfigBtn", "resetConfigBtn", "configDirtyBadge",
-    "configStatus", "toast",
+    "configStatus", "obsRefreshBtn", "obsControlPanel", "toast",
   ].forEach((id) => {
     els[id] = document.getElementById(id);
   });
@@ -30,6 +30,8 @@ document.addEventListener("DOMContentLoaded", () => {
   els.memoryRefreshBtn?.addEventListener("click", () => loadMemory());
   els.startBtn?.addEventListener("click", () => startLive());
   els.stopBtn?.addEventListener("click", () => stopLive());
+  els.obsRefreshBtn?.addEventListener("click", () => refreshObsControl());
+  els.obsControlPanel?.addEventListener("click", handleObsControlClick);
   els.saveConfigBtn?.addEventListener("click", () => saveConfig());
   els.resetConfigBtn?.addEventListener("click", () => resetConfigForm());
   els.viewerFilter?.addEventListener("input", () => {
@@ -218,6 +220,7 @@ function renderOverview() {
     ["嘴型", data.mouth_sync?.enabled ? "已启用" : "未启用"],
     ["嘴型参数", data.mouth_sync?.parameter || "--"],
   ]);
+  renderObsControl(data.obs_control || {});
   renderTopViewers(data.live?.top_viewers || []);
   renderEvents();
 }
@@ -236,6 +239,7 @@ function renderOfflineShell(error) {
   renderMetricList(els.autoReplyPanel, [["状态", "未知"], ["原因", error?.message || "请求失败"]]);
   renderMetricList(els.stagePanel, [["字幕预览", "页面内可用"], ["真实 overlay", "等待 API"]]);
   els.liveFlow.innerHTML = emptyText("未连接直播也可以使用配置页；当前只是拓展页 API 没有响应。");
+  renderObsControl({});
   renderEvents();
 }
 
@@ -268,6 +272,88 @@ function renderLiveFlow(data) {
       <small>${escapeHtml(desc)}</small>
     </div>
   `).join("");
+}
+
+function renderObsControl(control) {
+  if (!els.obsControlPanel) return;
+  const obs = control.obs || {};
+  const l2d = control.l2dstudio || {};
+  const settings = control.settings || {};
+  const enabled = Boolean(control.enabled);
+  const connected = Boolean(obs.websocket?.connected);
+  const streamAllowed = Boolean(control.safety?.stream_start_allowed);
+  const actionDisabled = !enabled;
+  const obsActionDisabled = actionDisabled || !connected;
+  const streamDisabled = obsActionDisabled || !streamAllowed;
+  const cards = [
+    ["控制开关", enabled ? "已启用" : "未启用", enabled ? "可执行开播控制" : "到配置页启用 OBS 开播控制", enabled ? "ok" : "idle"],
+    ["OBS", obs.running ? "运行中" : "未运行", obs.configured ? (obs.process?.exists ? obs.process?.name || "路径可用" : "路径不存在") : "未配置路径", obs.running ? "ok" : "idle"],
+    ["L2DStudio", l2d.running ? "运行中" : "未运行", l2d.configured ? (l2d.process?.exists ? l2d.process?.name || "路径可用" : "路径不存在") : "未配置路径", l2d.running ? "ok" : "idle"],
+    ["OBS WebSocket", connected ? "已连接" : "未连接", connected ? `${obs.websocket?.obs_version || "OBS"} / ${obs.websocket?.websocket_version || "WebSocket"}` : (obs.websocket?.error || "等待 OBS 启动并开启 WebSocket"), connected ? "ok" : "idle"],
+    ["当前场景", obs.current_scene || settings.obs_live_scene_name || "未读取", settings.obs_live_scene_name ? `默认：${settings.obs_live_scene_name}` : "未配置默认场景", obs.current_scene ? "ok" : "idle"],
+    ["推流状态", obs.streaming ? "直播中" : "未推流", streamAllowed ? "允许二次确认开播" : "配置禁止插件开播", obs.streaming ? "danger" : "idle"],
+  ];
+  els.obsControlPanel.innerHTML = `
+    <div class="obs-status-grid">
+      ${cards.map(([label, value, note, tone]) => `
+        <section class="obs-status-card ${escapeHtml(tone)}">
+          <span>${escapeHtml(label)}</span>
+          <b>${escapeHtml(value)}</b>
+          <small>${escapeHtml(note)}</small>
+        </section>
+      `).join("")}
+    </div>
+    <div class="obs-action-grid">
+      <button type="button" data-obs-action="open_obs" ${actionDisabled || !obs.configured ? "disabled" : ""}>打开 OBS</button>
+      <button type="button" data-obs-action="open_l2dstudio" ${actionDisabled || !l2d.configured ? "disabled" : ""}>打开 L2DStudio</button>
+      <button type="button" data-obs-action="start_apps" ${actionDisabled ? "disabled" : ""}>打开两端</button>
+      <button type="button" data-obs-action="check" ${actionDisabled ? "disabled" : ""}>检查连接</button>
+      <button type="button" data-obs-action="debug" ${actionDisabled ? "disabled" : ""}>直播调试</button>
+      <button type="button" data-obs-action="switch_scene" ${obsActionDisabled || !settings.obs_live_scene_name ? "disabled" : ""}>切换场景</button>
+      <button type="button" data-obs-action="${obs.virtual_camera ? "stop_virtual_camera" : "start_virtual_camera"}" ${obsActionDisabled ? "disabled" : ""}>${obs.virtual_camera ? "关闭虚拟摄像机" : "开启虚拟摄像机"}</button>
+      <button type="button" data-obs-action="${obs.recording ? "stop_record" : "start_record"}" ${obsActionDisabled ? "disabled" : ""}>${obs.recording ? "停止录制" : "开始录制"}</button>
+      <button type="button" class="danger" data-obs-action="start_stream" ${streamDisabled || obs.streaming ? "disabled" : ""}>开始直播</button>
+      <button type="button" class="danger-outline" data-obs-action="stop_stream" ${obsActionDisabled || !obs.streaming ? "disabled" : ""}>停止直播</button>
+    </div>
+    <p class="muted obs-hint">开始直播会调用 OBS StartStream，要求配置页开启“允许插件开始推流”，并且需要二次点击确认。B 站推流侧建议先安装 obs-bilibili-stream。</p>
+  `;
+}
+
+async function refreshObsControl() {
+  try {
+    const data = await LivePageApi.get("/control/obs/status");
+    state.overview = { ...(state.overview || {}), obs_control: data };
+    renderObsControl(data);
+    showToast("OBS 状态已刷新。");
+  } catch (error) {
+    showToast(error.message || String(error));
+  }
+}
+
+async function handleObsControlClick(event) {
+  const button = event.target instanceof Element ? event.target.closest("[data-obs-action]") : null;
+  if (!button) return;
+  const action = button.dataset.obsAction || "";
+  const body = { action };
+  if (action === "start_stream") {
+    if (!requireSecondClick(button, "start_stream", "再次点击会真正开始 OBS 推流", "确认开播")) return;
+    body.confirm = true;
+  }
+  try {
+    button.disabled = true;
+    const data = await LivePageApi.post("/control/obs/action", body);
+    if (data.obs_control) {
+      state.overview = { ...(state.overview || {}), obs_control: data.obs_control };
+      renderObsControl(data.obs_control);
+    } else {
+      await loadAll();
+    }
+    showToast(data.message || "OBS 控制动作已完成。");
+  } catch (error) {
+    showToast(error.message || String(error));
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderTopViewers(items) {
@@ -476,6 +562,31 @@ function showToast(text) {
   showToast.timer = window.setTimeout(() => {
     els.toast.hidden = true;
   }, 2600);
+}
+
+function requireSecondClick(button, key, message, nextText = "再次确认", timeoutMs = 6000) {
+  const now = Date.now();
+  const armed = button.dataset.confirmKey === key && now - Number(button.dataset.confirmAt || 0) < timeoutMs;
+  if (armed) {
+    delete button.dataset.confirmKey;
+    delete button.dataset.confirmAt;
+    return true;
+  }
+  button.dataset.confirmKey = key;
+  button.dataset.confirmAt = String(now);
+  button.dataset.originalText = button.dataset.originalText || button.textContent || "";
+  button.textContent = nextText;
+  showToast(message);
+  window.clearTimeout(button._confirmTimer);
+  button._confirmTimer = window.setTimeout(() => {
+    if (button.dataset.confirmKey === key) {
+      delete button.dataset.confirmKey;
+      delete button.dataset.confirmAt;
+      button.textContent = button.dataset.originalText || "";
+      delete button.dataset.originalText;
+    }
+  }, timeoutMs);
+  return false;
 }
 
 function escapeHtml(value) {

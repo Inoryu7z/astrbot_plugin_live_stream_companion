@@ -114,6 +114,18 @@
     "hint": "填写要监听的 B站直播间房间号，也可以用 /bili_live_start <房间号> 临时启动",
     "default": 0
   },
+  "part_id": {
+    "description": "B站直播父分区 ID",
+    "type": "int",
+    "hint": "B站直播父分区 ID，例如 2=网游。通常无需手填，可用 /分区 <子分区名/拼音/area_id> 自动反查并保存",
+    "default": 0
+  },
+  "area_id": {
+    "description": "B站直播子分区 ID",
+    "type": "int",
+    "hint": "B站直播子分区 ID，例如 86=英雄联盟。建议用 /分区 英雄联盟 或 /分区 86 设置，插件会自动同步 part_id",
+    "default": 0
+  },
   "bilibili_web_backend": {
     "description": "B站 Web 弹幕后端",
     "type": "string",
@@ -450,6 +462,71 @@
       "step": 0.5
     },
     "default": 3.0
+  },
+  "obs_control_enabled": {
+    "description": "启用 OBS 开播控制",
+    "type": "bool",
+    "hint": "允许拓展页启动 OBS/L2DStudio，并通过 OBS WebSocket 做直播调试。真正开始推流仍需要单独允许并二次确认。",
+    "default": false
+  },
+  "obs_exe_path": {
+    "description": "OBS 程序路径",
+    "type": "string",
+    "hint": "例如 C:\\Program Files\\obs-studio\\bin\\64bit\\obs64.exe。留空则不能自动启动 OBS。",
+    "default": ""
+  },
+  "l2dstudio_exe_path": {
+    "description": "L2DStudio 程序路径",
+    "type": "string",
+    "hint": "填写 L2DStudio 的 exe 路径。当前先支持启动与进程检查；若后续提供本地 API 地址，可继续扩展自动加载模型/调试。",
+    "default": ""
+  },
+  "obs_ws_host": {
+    "description": "OBS WebSocket 地址",
+    "type": "string",
+    "hint": "通常为 127.0.0.1。OBS 需要启用 WebSocket 服务。",
+    "default": "127.0.0.1"
+  },
+  "obs_ws_port": {
+    "description": "OBS WebSocket 端口",
+    "type": "int",
+    "hint": "OBS 28+ 常见默认端口为 4455。",
+    "default": 4455
+  },
+  "obs_ws_password": {
+    "description": "OBS WebSocket 密码",
+    "type": "string",
+    "hint": "如果 OBS WebSocket 开启了鉴权，这里填写密码。拓展页留空会保留已有密码。",
+    "default": ""
+  },
+  "obs_live_scene_name": {
+    "description": "默认直播场景名",
+    "type": "string",
+    "hint": "直播调试和开始推流前会尝试切换到该场景。留空则不自动切换场景。",
+    "default": ""
+  },
+  "obs_startup_wait_seconds": {
+    "description": "启动后等待秒数",
+    "type": "int",
+    "hint": "执行直播调试时，打开 OBS/L2DStudio 后等待多久再连接 OBS。范围 0-20 秒。",
+    "slider": {
+      "min": 0,
+      "max": 20,
+      "step": 1
+    },
+    "default": 3
+  },
+  "obs_debug_start_virtual_camera": {
+    "description": "调试时开启 OBS 虚拟摄像机",
+    "type": "bool",
+    "hint": "直播调试会启动程序、切换场景，并按此项决定是否开启虚拟摄像机。",
+    "default": true
+  },
+  "obs_allow_stream_start": {
+    "description": "允许插件开始推流",
+    "type": "bool",
+    "hint": "关闭时拓展页不能调用 OBS StartStream。开启后仍需要在拓展页二次点击确认。B 站直播建议先在 OBS 安装并配置 obs-bilibili-stream：https://github.com/Zarosmm/obs-bilibili-stream/releases",
+    "default": false
   },
   "bili_live_auto_reply_enabled": {
     "description": "启用直播弹幕自动回应",

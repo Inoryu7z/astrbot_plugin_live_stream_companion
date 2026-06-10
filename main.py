@@ -41,8 +41,10 @@ from .bilibili_live import (
     BilibiliBlivedmClient,
     BilibiliLaplaceClient,
     BilibiliLiveClient,
+    BilibiliLiveArea,
     BilibiliOpenLiveClient,
     LiveDanmakuEvent,
+    fetch_bilibili_live_areas,
     probe_bilibili_live_room,
 )
 from .l2d_mixin import Live2DMixin
@@ -98,7 +100,7 @@ class SyntheticBiliLiveWakeEvent(AstrMessageEvent):
     "astrbot_plugin_live_stream_companion",
     "menglimi",
     "B 站直播弹幕读取、自动回应、Live2D 表情动作、OBS 字幕和 TTS 嘴型联动",
-    "1.4.4",
+    "1.5.0",
     "https://github.com/menglimi/astrbot_plugin_live_stream_companion",
 )
 class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
@@ -139,6 +141,12 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         self._private_companion_writeback_seen: set[str] = set()
         self._private_companion_last_state_at = 0.0
         self._bili_reply_event_template: Optional[AstrMessageEvent] = None
+        self._bili_area_by_id: dict[int, BilibiliLiveArea] = {}
+        self._bili_area_by_key: dict[str, BilibiliLiveArea] = {}
+        self._bili_area_loaded_at = 0.0
+        self._bili_area_load_task: Optional[asyncio.Task] = None
+        self._private_companion_proactive_registered = False
+        self._private_companion_proactive_register_task: Optional[asyncio.Task] = None
         self._subtitle_server = None
         self._warned_bili_blivedm_fallback = False
         self.page_api = None
@@ -192,6 +200,8 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                 logger.info("[VTS] auto_connect 关闭，跳过自动连接")
 
             await self._start_subtitle_server_if_enabled()
+            await self._ensure_bili_area_cache()
+            self._start_private_companion_proactive_registration()
 
             if self._is_bili_live_enabled() and self.config.get(
                 "bili_live_auto_start", True
@@ -214,6 +224,15 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             for task in list(self._mouth_sync_tasks):
                 task.cancel()
             self._mouth_sync_tasks.clear()
+            if self._private_companion_proactive_register_task:
+                task = self._private_companion_proactive_register_task
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                self._private_companion_proactive_register_task = None
+            self._unregister_private_companion_proactive_abilities()
             await self._stop_bili_live()
             await self._stop_subtitle_server()
             await self.vts.disconnect()
@@ -413,6 +432,404 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                 or ""
             ).strip(),
         }
+
+    async def _ensure_bili_area_cache(self, force: bool = False) -> bool:
+        if self._bili_area_by_id and not force:
+            return True
+        if self._bili_area_load_task and not self._bili_area_load_task.done():
+            try:
+                await self._bili_area_load_task
+            except Exception:
+                return bool(self._bili_area_by_id)
+            return bool(self._bili_area_by_id)
+
+        self._bili_area_load_task = asyncio.create_task(self._load_bili_area_cache())
+        try:
+            await self._bili_area_load_task
+        except Exception:
+            return bool(self._bili_area_by_id)
+        return bool(self._bili_area_by_id)
+
+    async def _load_bili_area_cache(self) -> None:
+        try:
+            areas = await fetch_bilibili_live_areas()
+        except Exception as e:
+            logger.warning(f"[B站直播] 直播分区列表加载失败: {e}")
+            return
+
+        by_id: dict[int, BilibiliLiveArea] = {}
+        by_key: dict[str, BilibiliLiveArea] = {}
+        for area in areas:
+            by_id[area.area_id] = area
+            for key in self._bili_area_lookup_keys(area):
+                by_key.setdefault(key, area)
+
+        self._bili_area_by_id = by_id
+        self._bili_area_by_key = by_key
+        self._bili_area_loaded_at = time.time()
+        logger.info(f"[B站直播] 已加载直播分区列表: {len(by_id)} 个子分区")
+
+    def _bili_area_lookup_keys(self, area: BilibiliLiveArea) -> list[str]:
+        keys = [
+            str(area.area_id),
+            area.area_name,
+            area.pinyin,
+            f"{area.part_name}/{area.area_name}",
+        ]
+        return [self._normalize_bili_area_query(key) for key in keys if key]
+
+    def _normalize_bili_area_query(self, query: Any) -> str:
+        return re.sub(r"\s+", "", str(query or "").strip().lower())
+
+    async def _find_bili_area(self, query: Any) -> Optional[BilibiliLiveArea]:
+        text = str(query or "").strip()
+        if not text:
+            return None
+        await self._ensure_bili_area_cache()
+        area_id = self._safe_parse_int(text, 0)
+        if area_id and area_id in self._bili_area_by_id:
+            return self._bili_area_by_id[area_id]
+        return self._bili_area_by_key.get(self._normalize_bili_area_query(text))
+
+    async def _persist_plugin_config_updates(self, updates: dict[str, Any]) -> bool:
+        if not updates:
+            return True
+        manager = getattr(getattr(self, "page_api", None), "config_manager", None)
+        if manager is None:
+            try:
+                from .page_config import PageConfigManager
+
+                manager = PageConfigManager(
+                    self,
+                    "astrbot_plugin_live_stream_companion",
+                    logger,
+                )
+            except Exception:
+                manager = None
+
+        if manager is not None and callable(getattr(manager, "apply_updates", None)):
+            return bool(await manager.apply_updates(updates))
+
+        for key, value in updates.items():
+            self.config[key] = value
+        return False
+
+    def _start_private_companion_proactive_registration(self) -> None:
+        if (
+            self._private_companion_proactive_register_task
+            and not self._private_companion_proactive_register_task.done()
+        ):
+            return
+        self._private_companion_proactive_register_task = asyncio.create_task(
+            self._register_private_companion_proactive_abilities_with_retry()
+        )
+
+    async def _register_private_companion_proactive_abilities_with_retry(self) -> None:
+        for attempt in range(12):
+            if self._register_private_companion_proactive_abilities():
+                return
+            await asyncio.sleep(5 if attempt else 1)
+
+    def _private_companion_extension_api(self) -> Any | None:
+        try:
+            module = importlib.import_module(
+                "data.plugins.astrbot_plugin_private_companion.main"
+            )
+            get_api = getattr(module, "get_private_companion_api", None)
+            return get_api() if callable(get_api) else None
+        except Exception as e:
+            logger.debug(f"[B站直播] 读取陪伴插件外部能力 API 失败: {e}")
+        return None
+
+    def _register_private_companion_proactive_abilities(self) -> bool:
+        api = self._private_companion_extension_api()
+        register_ability = getattr(api, "register_proactive_ability", None)
+        if not callable(register_ability):
+            return False
+        ok_start = register_ability(
+            {
+                "name": "live_stream_start",
+                "module": "直播陪伴",
+                "label": "准备开播",
+                "description": "在合适时机准备直播，选择分区、拟定标题，并可按配置启动监听或 OBS 推流。",
+                "when": "当前日程、心情或话题适合和直播间观众互动，且直播环境已经准备好时",
+                "use_for": "形成一场直播的开场素材、现场感和可分享的生活事件",
+                "avoid": "不要暴露 OBS、插件、接口、配置字段或执行过程；未真正推流时不要说已经开播",
+                "share_probability": 0.04,
+                "min_interval_hours": 24,
+                "default_enabled": False,
+                "default_config": {
+                    "area_query": "",
+                    "title_template": "",
+                    "start_listener": True,
+                    "start_apps": True,
+                    "start_obs_stream": False,
+                    "update_area_config": True,
+                    "scene": "",
+                    "wait_seconds": 5,
+                },
+                "config_schema": {
+                    "area_query": {
+                        "label": "默认分区",
+                        "description": "可填子分区名、拼音或 area_id；留空使用直播插件当前 area_id",
+                    },
+                    "title_template": {
+                        "label": "标题模板",
+                        "description": "支持 {area_name}、{part_name}、{bot_name}、{display_name}、{reason}、{plan}",
+                    },
+                    "start_listener": {
+                        "label": "启动弹幕监听",
+                        "description": "执行时调用直播插件的 B 站弹幕监听",
+                    },
+                    "start_apps": {
+                        "label": "启动 OBS/L2DStudio",
+                        "description": "执行前尝试打开已配置的 OBS 和 L2DStudio",
+                    },
+                    "start_obs_stream": {
+                        "label": "启动 OBS 推流",
+                        "description": "危险动作；还需要直播插件 obs_allow_stream_start 为 true",
+                    },
+                    "update_area_config": {
+                        "label": "写回分区配置",
+                        "description": "用默认分区反查到 part_id/area_id 后写回直播插件配置",
+                    },
+                    "scene": {
+                        "label": "OBS 场景",
+                        "description": "留空使用直播插件默认直播场景",
+                    },
+                    "wait_seconds": {
+                        "label": "启动等待秒数",
+                        "description": "打开程序后等待 OBS WebSocket 就绪的时间",
+                    },
+                },
+                "executor": self._execute_private_companion_start_live_ability,
+            }
+        )
+        ok_stop = register_ability(
+            {
+                "name": "live_stream_stop",
+                "module": "直播陪伴",
+                "label": "结束直播",
+                "description": "在合适时机收束直播，可按配置停止 OBS 推流和弹幕监听并触发下播小结。",
+                "when": "当前直播已经接近尾声、日程切换、能量下降或需要收束现场互动时",
+                "use_for": "整理直播余韵、结束监听、沉淀下播小结",
+                "avoid": "不要暴露 OBS、插件、接口、配置字段或执行过程；未真正推流时不要说已经下播",
+                "share_probability": 0.03,
+                "min_interval_hours": 12,
+                "default_enabled": False,
+                "default_config": {
+                    "stop_listener": True,
+                    "stop_obs_stream": False,
+                },
+                "config_schema": {
+                    "stop_listener": {
+                        "label": "停止弹幕监听",
+                        "description": "执行时调用直播插件停止 B 站弹幕监听",
+                    },
+                    "stop_obs_stream": {
+                        "label": "停止 OBS 推流",
+                        "description": "危险动作；开启后会调用 OBS StopStream",
+                    },
+                },
+                "executor": self._execute_private_companion_stop_live_ability,
+            }
+        )
+        self._private_companion_proactive_registered = bool(ok_start and ok_stop)
+        if self._private_companion_proactive_registered:
+            logger.info("[B站直播] 已向陪伴插件注册主动开播/下播外部能力。")
+        return self._private_companion_proactive_registered
+
+    def _unregister_private_companion_proactive_abilities(self) -> None:
+        api = self._private_companion_extension_api()
+        unregister = getattr(api, "unregister_proactive_ability", None)
+        if not callable(unregister):
+            return
+        for name in ("live_stream_start", "live_stream_stop"):
+            try:
+                unregister(name)
+            except Exception as e:
+                logger.debug(f"[B站直播] 注销陪伴插件外部能力失败 {name}: {e}")
+        self._private_companion_proactive_registered = False
+
+    async def _execute_private_companion_start_live_ability(
+        self, ctx: dict[str, Any]
+    ) -> dict[str, Any]:
+        ability_config = ctx.get("config") if isinstance(ctx.get("config"), dict) else {}
+        messages: list[str] = []
+        area = await self._resolve_proactive_live_area(ability_config)
+        title = self._draft_proactive_live_title(ctx, ability_config, area)
+
+        if self._config_bool(ability_config.get("start_listener"), True):
+            room_id = self._get_config_room_id()
+            if self._get_bili_live_type() == "web" and not room_id:
+                messages.append("未配置 B站直播房间号，已跳过弹幕监听")
+            else:
+                messages.append(await self._start_bili_live(room_id))
+
+        if self._config_bool(ability_config.get("start_obs_stream"), False):
+            messages.extend(await self._start_obs_stream_for_proactive(ability_config))
+        elif self._config_bool(ability_config.get("start_apps"), True):
+            messages.extend(await self._start_live_apps_for_proactive(ability_config))
+
+        area_text = area.display_text() if area else "未指定分区"
+        context = (
+            f"直播准备：分区 {area_text}；拟定标题《{title}》。"
+            f"{'；'.join(item for item in messages if item)}"
+        )
+        return {
+            "ok": True,
+            "context": context,
+            "summary": f"准备直播：{title}",
+            "memory": f"准备了一场直播，分区是 {area_text}，标题草案是《{title}》。",
+            "status": context,
+        }
+
+    async def _execute_private_companion_stop_live_ability(
+        self, ctx: dict[str, Any]
+    ) -> dict[str, Any]:
+        ability_config = ctx.get("config") if isinstance(ctx.get("config"), dict) else {}
+        messages: list[str] = []
+        if self._config_bool(ability_config.get("stop_obs_stream"), False):
+            messages.extend(await self._stop_obs_stream_for_proactive())
+        if self._config_bool(ability_config.get("stop_listener"), True):
+            messages.append(await self._stop_bili_live())
+        if not messages:
+            messages.append("没有启用具体下播动作，只记录了下播意图")
+        context = "直播收束：" + "；".join(item for item in messages if item)
+        return {
+            "ok": True,
+            "context": context,
+            "summary": "结束直播",
+            "memory": "主动收束了一次直播，并把下播余韵整理进直播记忆。",
+            "status": context,
+        }
+
+    async def _resolve_proactive_live_area(
+        self, ability_config: dict[str, Any]
+    ) -> Optional[BilibiliLiveArea]:
+        query = str(ability_config.get("area_query") or "").strip()
+        if not query:
+            query = str(self.config.get("area_id") or "").strip()
+        area = await self._find_bili_area(query) if query else None
+        if area and self._config_bool(ability_config.get("update_area_config"), True):
+            await self._persist_plugin_config_updates(
+                {"part_id": area.part_id, "area_id": area.area_id}
+            )
+        return area
+
+    def _draft_proactive_live_title(
+        self,
+        ctx: dict[str, Any],
+        ability_config: dict[str, Any],
+        area: Optional[BilibiliLiveArea],
+    ) -> str:
+        plan = ctx.get("current_plan_item") if isinstance(ctx.get("current_plan_item"), dict) else {}
+        plan_text = self._single_line_text(
+            plan.get("title") or plan.get("summary") or plan.get("activity") or "",
+            32,
+        )
+        reason = self._single_line_text(ctx.get("reason"), 48)
+        values = {
+            "area_name": area.area_name if area else "闲聊",
+            "part_name": area.part_name if area else "直播",
+            "bot_name": self._single_line_text(ctx.get("bot_name"), 24) or "我",
+            "display_name": self._single_line_text(ctx.get("display_name"), 24) or "大家",
+            "reason": reason,
+            "plan": plan_text,
+        }
+        template = str(ability_config.get("title_template") or "").strip()
+        if template:
+            try:
+                title = template.format(**values)
+            except Exception:
+                title = template
+        else:
+            topic = plan_text or reason or values["area_name"]
+            title = f"{values['area_name']}陪伴场：{topic}"
+        return self._single_line_text(title, 30).strip(" ：:") or "今天也开一会儿"
+
+    async def _start_live_apps_for_proactive(
+        self, ability_config: dict[str, Any]
+    ) -> list[str]:
+        helper = self._page_api_helper()
+        if helper is None:
+            return ["拓展页控制 API 不可用，无法启动 OBS/L2DStudio"]
+        messages: list[str] = []
+        for app in ("obs", "l2dstudio"):
+            try:
+                messages.append(helper._start_configured_app(app))
+            except Exception as e:
+                messages.append(self._single_line_text(e, 90))
+        wait_seconds = max(
+            0,
+            min(20, self._safe_parse_int(ability_config.get("wait_seconds"), 5)),
+        )
+        if wait_seconds:
+            await asyncio.sleep(wait_seconds)
+        return messages
+
+    async def _start_obs_stream_for_proactive(
+        self, ability_config: dict[str, Any]
+    ) -> list[str]:
+        if not bool(self.config.get("obs_control_enabled", False)):
+            return ["OBS 开播控制未启用，已跳过推流"]
+        if not bool(self.config.get("obs_allow_stream_start", False)):
+            return ["直播插件未允许 OBS StartStream，已跳过推流"]
+        helper = self._page_api_helper()
+        if helper is None:
+            return ["拓展页控制 API 不可用，无法启动 OBS 推流"]
+        messages = []
+        if self._config_bool(ability_config.get("start_apps"), True):
+            messages.extend(await self._start_live_apps_for_proactive(ability_config))
+        scene = self._single_line_text(
+            ability_config.get("scene") or self.config.get("obs_live_scene_name"),
+            120,
+        )
+        if scene:
+            await helper._obs_request("SetCurrentProgramScene", {"sceneName": scene})
+            messages.append(f"OBS 已切换到场景：{scene}")
+        status = await helper._obs_control_status(check_obs_ws=True)
+        if ((status.get("obs") or {}).get("streaming")):
+            messages.append("OBS 已在推流中")
+            return messages
+        await helper._obs_request("StartStream")
+        messages.append("OBS 推流已开始")
+        return messages
+
+    async def _stop_obs_stream_for_proactive(self) -> list[str]:
+        if not bool(self.config.get("obs_control_enabled", False)):
+            return ["OBS 开播控制未启用，已跳过停止推流"]
+        helper = self._page_api_helper()
+        if helper is None:
+            return ["拓展页控制 API 不可用，无法停止 OBS 推流"]
+        status = await helper._obs_control_status(check_obs_ws=True)
+        if not ((status.get("obs") or {}).get("streaming")):
+            return ["OBS 当前未推流"]
+        await helper._obs_request("StopStream")
+        return ["OBS 推流已停止"]
+
+    def _page_api_helper(self) -> Any | None:
+        if self.page_api is not None:
+            return self.page_api
+        try:
+            from .page_api import LiveStreamCompanionPageApi
+
+            self.page_api = LiveStreamCompanionPageApi(self)
+            return self.page_api
+        except Exception as e:
+            logger.debug(f"[B站直播] 创建拓展页控制 helper 失败: {e}")
+            return None
+
+    def _config_bool(self, value: Any, default: bool = False) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"1", "true", "yes", "on", "开启"}:
+                return True
+            if text in {"0", "false", "no", "off", "关闭"}:
+                return False
+        return bool(value)
 
     async def _start_bili_live(self, room_id: int) -> str:
         if not self._is_bili_live_enabled():
@@ -2728,6 +3145,51 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             f"已缓存事件：{len(self._bili_events)} 条\n"
             f"最近事件：{latest}\n"
             f"最近错误：{last_error}"
+        )
+
+    @filter.command("分区")
+    @filter.command("bili_live_area")
+    async def cmd_bili_live_area(self, event: AstrMessageEvent, query: str = ""):
+        """按分区名、拼音或 area_id 设置 B站直播分区。"""
+        query = str(query or "").strip()
+        if query.lower() in {"refresh", "reload"} or query in {"刷新", "重载"}:
+            loaded = await self._ensure_bili_area_cache(force=True)
+            yield event.plain_result(
+                f"直播分区列表已刷新，共 {len(self._bili_area_by_id)} 个子分区。"
+                if loaded
+                else "直播分区列表刷新失败，请稍后再试。"
+            )
+            return
+
+        if not query:
+            area = await self._find_bili_area(self.config.get("area_id"))
+            current = area.display_text() if area else (
+                f"part_id={self.config.get('part_id') or '未配置'}, "
+                f"area_id={self.config.get('area_id') or '未配置'}"
+            )
+            yield event.plain_result(
+                "当前 B站直播分区："
+                f"{current}\n"
+                "用法：/分区 英雄联盟、/分区 yingxionglianmeng、/分区 86"
+            )
+            return
+
+        area = await self._find_bili_area(query)
+        if not area:
+            yield event.plain_result(
+                "没有找到这个 B站直播分区。可以输入子分区名、拼音或 area_id，"
+                "例如 /分区 英雄联盟、/分区 yingxionglianmeng、/分区 86。"
+            )
+            return
+
+        persisted = await self._persist_plugin_config_updates(
+            {"part_id": area.part_id, "area_id": area.area_id}
+        )
+        warning = "\n提示：该分区可能受限，B站侧可能不允许随便设置。" if area.locked else ""
+        persisted_text = "已写入配置。" if persisted else "已应用到当前运行实例，但未确认持久化。"
+        yield event.plain_result(
+            f"已设置 B站直播分区：{area.display_text()}\n"
+            f"{persisted_text}{warning}"
         )
 
     @filter.command("bili_live_debug")

@@ -31,7 +31,7 @@ class PageConfigManager:
     def values(self, keys: list[str]) -> dict[str, Any]:
         schema = self.read_schema()
         return {
-            key: self.plugin.config.get(key, schema.get(key, {}).get("default"))
+            key: "" if key == "obs_ws_password" else self.plugin.config.get(key, schema.get(key, {}).get("default"))
             for key in keys
         }
 
@@ -41,6 +41,8 @@ class PageConfigManager:
         updates: dict[str, Any] = {}
         for key, value in values.items():
             if key not in editable_keys or key not in schema:
+                continue
+            if key == "obs_ws_password" and not str(value or "").strip():
                 continue
             updates[key] = self.coerce_value(value, schema[key])
         return updates
@@ -133,6 +135,8 @@ class PageConfigManager:
             "bilibili_enabled",
             "bilibili_type",
             "bilibili_room_id",
+            "part_id",
+            "area_id",
             "bilibili_web_backend",
             "laplace_event_bridge_url",
             "laplace_event_bridge_token",
@@ -142,6 +146,16 @@ class PageConfigManager:
             "bili_live_cache_size",
             "bili_live_log_events",
             "bili_live_debug_log",
+            "obs_control_enabled",
+            "obs_exe_path",
+            "l2dstudio_exe_path",
+            "obs_ws_host",
+            "obs_ws_port",
+            "obs_ws_password",
+            "obs_live_scene_name",
+            "obs_startup_wait_seconds",
+            "obs_debug_start_virtual_camera",
+            "obs_allow_stream_start",
             "bili_live_auto_reply_enabled",
             "bili_live_auto_reply_mode",
             "bili_live_auto_reply_session_id",
@@ -221,6 +235,8 @@ class PageConfigManager:
                     "bilibili_enabled",
                     "bilibili_type",
                     "bilibili_room_id",
+                    "part_id",
+                    "area_id",
                     "bilibili_web_backend",
                     "laplace_event_bridge_url",
                     "laplace_event_bridge_token",
@@ -230,6 +246,23 @@ class PageConfigManager:
                     "bili_live_cache_size",
                     "bili_live_log_events",
                     "bili_live_debug_log",
+                ],
+            },
+            {
+                "id": "obs",
+                "title": "OBS 开播控制",
+                "description": "启动 OBS/L2DStudio、连接 OBS WebSocket、调试场景和二次确认开播。",
+                "keys": [
+                    "obs_control_enabled",
+                    "obs_exe_path",
+                    "l2dstudio_exe_path",
+                    "obs_ws_host",
+                    "obs_ws_port",
+                    "obs_ws_password",
+                    "obs_live_scene_name",
+                    "obs_startup_wait_seconds",
+                    "obs_debug_start_virtual_camera",
+                    "obs_allow_stream_start",
                 ],
             },
             {
@@ -336,9 +369,11 @@ class PageConfigManager:
                 return value.strip().lower() in {"1", "true", "yes", "on", "开启"}
             return bool(value)
         if value_type == "int":
-            return PageConfigManager._int(value, PageConfigManager._int(meta.get("default")))
+            number = PageConfigManager._int(value, PageConfigManager._int(meta.get("default")))
+            return int(PageConfigManager._clamp_by_slider(number, meta))
         if value_type == "float":
-            return PageConfigManager._float(value, PageConfigManager._float(meta.get("default")))
+            number = PageConfigManager._float(value, PageConfigManager._float(meta.get("default")))
+            return PageConfigManager._clamp_by_slider(number, meta)
         if value_type == "list":
             if isinstance(value, list):
                 return [str(item).strip() for item in value if str(item).strip()]
@@ -360,3 +395,12 @@ class PageConfigManager:
             return float(value)
         except (TypeError, ValueError):
             return default
+
+    @staticmethod
+    def _clamp_by_slider(value: float, meta: dict[str, Any]) -> float:
+        slider = meta.get("slider") if isinstance(meta.get("slider"), dict) else {}
+        if "min" in slider:
+            value = max(value, PageConfigManager._float(slider.get("min"), value))
+        if "max" in slider:
+            value = min(value, PageConfigManager._float(slider.get("max"), value))
+        return value

@@ -359,6 +359,74 @@ article.wide,
   margin-top: 12px;
 }
 
+.obs-control-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.obs-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.obs-status-card {
+  min-width: 0;
+  border: 1px solid rgba(222, 215, 203, 0.82);
+  border-radius: var(--radius);
+  padding: 12px;
+  background: rgba(255,255,255,0.9);
+}
+
+.obs-status-card.ok {
+  border-color: rgba(47, 117, 102, 0.32);
+}
+
+.obs-status-card.danger {
+  border-color: rgba(155, 51, 51, 0.42);
+}
+
+.obs-status-card span,
+.obs-status-card small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.obs-status-card b {
+  display: block;
+  margin: 4px 0;
+  color: var(--ink);
+  font-size: 18px;
+  overflow-wrap: anywhere;
+}
+
+.obs-action-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.obs-action-grid button {
+  min-width: 0;
+}
+
+.obs-action-grid .danger {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+}
+
+.obs-action-grid .danger-outline {
+  border-color: rgba(155, 51, 51, 0.46);
+  color: var(--danger);
+}
+
+.obs-hint {
+  font-size: 12px;
+}
+
 .metric-row,
 dl div {
   display: flex;
@@ -815,6 +883,8 @@ dl {
   .flow,
   .config-workbench,
   .subtitle-workbench,
+  .obs-status-grid,
+  .obs-action-grid,
   .field-grid {
     grid-template-columns: 1fr;
   }

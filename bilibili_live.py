@@ -49,6 +49,7 @@ OP_AUTH_REPLY = 8
 OPEN_LIVE_START_URL = "https://live-open.biliapi.com/v2/app/start"
 OPEN_LIVE_HEARTBEAT_URL = "https://live-open.biliapi.com/v2/app/heartbeat"
 OPEN_LIVE_END_URL = "https://live-open.biliapi.com/v2/app/end"
+BILI_LIVE_AREA_LIST_URL = "https://api.live.bilibili.com/room/v1/Area/getList"
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -88,8 +89,74 @@ class LiveDanmakuEvent:
         return f"{self.username} {self.content}".strip()
 
 
+@dataclasses.dataclass(frozen=True)
+class BilibiliLiveArea:
+    part_id: int
+    part_name: str
+    area_id: int
+    area_name: str
+    pinyin: str = ""
+    locked: bool = False
+
+    def display_text(self) -> str:
+        suffix = "（可能受限）" if self.locked else ""
+        return (
+            f"{self.part_name} / {self.area_name}"
+            f"（part_id={self.part_id}, area_id={self.area_id}）{suffix}"
+        )
+
+
 class BilibiliLiveError(Exception):
     pass
+
+
+async def fetch_bilibili_live_areas() -> list[BilibiliLiveArea]:
+    async with aiohttp.ClientSession(headers=HTTP_HEADERS) as session:
+        async with session.get(
+            BILI_LIVE_AREA_LIST_URL,
+            params={"show_pinyin": 1},
+            timeout=10,
+        ) as resp:
+            resp.raise_for_status()
+            payload = await resp.json(content_type=None)
+
+    if payload.get("code") != 0:
+        raise BilibiliLiveError(
+            f"直播分区列表获取失败: code={payload.get('code')} message={payload.get('message')}"
+        )
+
+    areas: list[BilibiliLiveArea] = []
+    for part in payload.get("data") or []:
+        if not isinstance(part, dict):
+            continue
+        part_id = _safe_int(part.get("id"))
+        part_name = str(part.get("name") or "").strip()
+        for area in part.get("list") or []:
+            if not isinstance(area, dict):
+                continue
+            area_id = _safe_int(area.get("id"))
+            area_name = str(area.get("name") or "").strip()
+            if not part_id or not area_id or not area_name:
+                continue
+            parent_id = _safe_int(area.get("parent_id")) or part_id
+            areas.append(
+                BilibiliLiveArea(
+                    part_id=parent_id,
+                    part_name=part_name,
+                    area_id=area_id,
+                    area_name=area_name,
+                    pinyin=str(area.get("pinyin") or "").strip(),
+                    locked=str(area.get("lock_status") or "").strip() == "1",
+                )
+            )
+    return areas
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 class BilibiliBlivedmClient:
