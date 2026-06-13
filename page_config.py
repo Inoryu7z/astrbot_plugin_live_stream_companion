@@ -212,6 +212,7 @@ class PageConfigManager:
             "subtitle_strip_tts_blocks",
             "subtitle_voice_use_following_plain",
             "subtitle_prefer_chinese_text",
+            "subtitle_use_tts_spoken_text",
             "subtitle_strip_html_tags",
             "mouth_sync_enabled",
             "mouth_sync_open_parameter",
@@ -340,6 +341,7 @@ class PageConfigManager:
                     "subtitle_strip_tts_blocks",
                     "subtitle_voice_use_following_plain",
                     "subtitle_prefer_chinese_text",
+                    "subtitle_use_tts_spoken_text",
                     "subtitle_strip_html_tags",
                 ],
             },
@@ -404,3 +406,5 @@ class PageConfigManager:
         if "max" in slider:
             value = min(value, PageConfigManager._float(slider.get("max"), value))
         return value
+
+

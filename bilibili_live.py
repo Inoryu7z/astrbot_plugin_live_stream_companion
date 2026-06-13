@@ -60,6 +60,8 @@ HTTP_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9",
     "Accept-Encoding": "gzip, deflate",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
     "Origin": "https://live.bilibili.com",
     "Referer": "https://live.bilibili.com/",
 }
@@ -107,6 +109,10 @@ class BilibiliLiveArea:
 
 
 class BilibiliLiveError(Exception):
+    pass
+
+
+class BilibiliLiveRiskControlError(BilibiliLiveError):
     pass
 
 
@@ -349,6 +355,7 @@ class BilibiliLiveClient:
         reconnect_interval: float = 5.0,
         debug_log: bool = False,
         history_poll_interval: float = 3.0,
+        websocket_enabled: bool = True,
     ):
         self.room_id = int(room_id)
         self.sessdata = sessdata.strip()
@@ -356,6 +363,7 @@ class BilibiliLiveClient:
         self.reconnect_interval = reconnect_interval
         self.debug_log = debug_log
         self.history_poll_interval = max(0.0, float(history_poll_interval or 0.0))
+        self.websocket_enabled = bool(websocket_enabled)
         self.real_room_id: Optional[int] = None
 
         self._session: Optional[aiohttp.ClientSession] = None
@@ -383,11 +391,32 @@ class BilibiliLiveClient:
             self.real_room_id = await self._resolve_room_id()
             self._history_started_at = time.time()
             self._start_history_polling()
+            if not self.websocket_enabled:
+                logger.info(
+                    "[B站直播] 已启动 history-only 弹幕监听: room=%s interval=%.1fs",
+                    self.real_room_id,
+                    self.history_poll_interval,
+                )
+                while not self._stop_event.is_set():
+                    await asyncio.sleep(1.0)
+                return
+            retry_delay = self.reconnect_interval
             while not self._stop_event.is_set():
                 try:
                     await self._run_once()
+                    retry_delay = self.reconnect_interval
                 except asyncio.CancelledError:
                     raise
+                except BilibiliLiveRiskControlError as e:
+                    if self._stop_event.is_set():
+                        break
+                    logger.warning(
+                        "[B站直播] 弹幕接口疑似被 B站风控，%.0fs 后重试: %s",
+                        retry_delay,
+                        e,
+                    )
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(max(retry_delay * 2, 30.0), 300.0)
                 except Exception as e:
                     if self._stop_event.is_set():
                         break
@@ -440,6 +469,13 @@ class BilibiliLiveClient:
             params=params,
         )
         if data.get("code") != 0:
+            if int(data.get("code") or 0) == -352:
+                hint = "请在直播插件配置中填写浏览器 B站 Cookie/SESSDATA，或暂停几分钟后再启动监听"
+                if self.sessdata:
+                    hint = "当前 Cookie 仍被风控或已失效，请更新 B站 Cookie/SESSDATA，或暂停几分钟后再启动监听"
+                raise BilibiliLiveRiskControlError(
+                    f"弹幕服务器信息获取失败: code=-352 message={data.get('message')}；{hint}"
+                )
             raise BilibiliLiveError(f"弹幕服务器信息获取失败: {data}")
         return data.get("data") or {}
 
@@ -1058,6 +1094,7 @@ async def probe_bilibili_live_room(room_id: int, sessdata: str = "") -> dict[str
         "live_status": (room_init.get("data") or {}).get("live_status"),
         "danmu_info_code": danmu_info.get("code"),
         "danmu_info_message": danmu_info.get("message"),
+        "danmu_risk_control": int(danmu_info.get("code") or 0) == -352,
         "danmu_token_present": bool((danmu_info.get("data") or {}).get("token")),
         "danmu_host_count": len(host_list),
         "danmu_hosts": [

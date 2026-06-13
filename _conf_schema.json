@@ -129,13 +129,14 @@
   "bilibili_web_backend": {
     "description": "B站 Web 弹幕后端",
     "type": "string",
-    "hint": "推荐 laplace 或 builtin。laplace 连接本机 LAPLACE Event Bridge；builtin 为 B站直连；blivedm 保留为兼容选项但可能无事件",
+    "hint": "推荐 builtin。builtin 为 B站直连；history 只使用历史弹幕轮询，不请求 websocket 弹幕服务器信息，适合 getDanmuInfo -352 风控时使用；laplace 连接本机 LAPLACE Event Bridge；blivedm 保留为兼容选项但可能无事件",
     "options": [
+      "history",
       "laplace",
       "blivedm",
       "builtin"
     ],
-    "default": "laplace"
+    "default": "builtin"
   },
   "laplace_event_bridge_url": {
     "description": "Laplace Event Bridge 地址",
@@ -455,7 +456,7 @@
   "bili_live_history_poll_interval": {
     "description": "历史弹幕轮询间隔",
     "type": "float",
-    "hint": "builtin 后端的兜底轮询。WebSocket 只收到心跳时，会用历史弹幕接口补抓普通弹幕；设为 0 可关闭",
+    "hint": "builtin 后端的兜底轮询，也是 history 后端的主监听间隔；设为 0 可关闭历史轮询",
     "slider": {
       "min": 0,
       "max": 30,
@@ -607,6 +608,28 @@
       "step": 1
     },
     "default": 5
+  },
+  "bili_live_continuity_context_max_viewers": {
+    "description": "连续对话参考观众数",
+    "type": "int",
+    "hint": "自动回应时，为当前批次中最多多少位观众附加本场前文",
+    "slider": {
+      "min": 1,
+      "max": 8,
+      "step": 1
+    },
+    "default": 3
+  },
+  "bili_live_continuity_context_per_viewer": {
+    "description": "每位观众前文条数",
+    "type": "int",
+    "hint": "自动回应时，为同一直播用户名最多附加多少条本场旧互动",
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    },
+    "default": 4
   },
   "bili_live_auto_reply_max_length": {
     "description": "自动回应最大长度",
@@ -868,6 +891,12 @@
     "hint": "开启后，字幕会优先显示包含中文的片段；当文本前半段是日语语音内容、后半段是中文正文时，会从第一个中文字符开始截取",
     "default": true
   },
+  "subtitle_use_tts_spoken_text": {
+    "description": "直播 TTS 字幕显示朗读文本",
+    "type": "bool",
+    "hint": "开启后，直播自动回应的打字机字幕会显示实际送入 TTS 的朗读文本，例如日语或英语；关闭时显示中文可见回复。",
+    "default": false
+  },
   "subtitle_strip_html_tags": {
     "description": "字幕清理尖括号标签",
     "type": "bool",
@@ -885,3 +914,4 @@
     "default": false
   }
 }
+

@@ -13,13 +13,15 @@ import platform
 import re
 import time
 import uuid
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from astrbot.api.star import Star, Context, register
 from astrbot.api import llm_tool, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api import logger
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Plain, Record
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import AssistantMessageSegment
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
@@ -100,7 +102,7 @@ class SyntheticBiliLiveWakeEvent(AstrMessageEvent):
     "astrbot_plugin_live_stream_companion",
     "menglimi",
     "B 站直播弹幕读取、自动回应、Live2D 表情动作、OBS 字幕和 TTS 嘴型联动",
-    "1.5.0",
+    "1.6.0",
     "https://github.com/menglimi/astrbot_plugin_live_stream_companion",
 )
 class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
@@ -860,7 +862,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                     on_event=self._on_bili_live_event,
                     debug_log=self._bili_debug_mode,
                 )
-            elif web_backend == "builtin":
+            elif web_backend in {"builtin", "history"}:
                 self._bili_live_client = BilibiliLiveClient(
                     room_id=room_id,
                     sessdata=sessdata,
@@ -869,6 +871,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                     history_poll_interval=self._safe_parse_float(
                         self.config.get("bili_live_history_poll_interval"), 3.0
                     ),
+                    websocket_enabled=web_backend != "history",
                 )
             else:
                 self._bili_live_client = BilibiliBlivedmClient(
@@ -1012,7 +1015,73 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         configured = str(self.config.get("bili_live_auto_reply_session_id") or "").strip()
         if configured:
             return configured
-        return await self.get_kv_data(KV_KEY_BILI_REPLY_SESSION, "")
+        fallback = self._default_bili_reply_session_to_self()
+        if fallback:
+            logger.info("[B站直播] 未显式配置自动回应会话，默认使用 Bot 自己的私聊会话: %s", fallback)
+            return fallback
+        bound = str(await self.get_kv_data(KV_KEY_BILI_REPLY_SESSION, "") or "").strip()
+        if bound:
+            return bound
+        return ""
+
+    def _default_bili_reply_session_to_self(self) -> str:
+        platform_manager = getattr(self.context, "platform_manager", None)
+        platform_insts = list(getattr(platform_manager, "platform_insts", []) or [])
+        candidates: list[tuple[int, str, str]] = []
+        platform_ids: list[str] = []
+        for inst in platform_insts:
+            try:
+                meta = inst.meta()
+                platform_id = str(getattr(meta, "id", "") or "").strip()
+            except Exception:
+                platform_id = ""
+            if not platform_id:
+                platform_id = str(getattr(inst, "id", "") or getattr(inst, "name", "") or "").strip()
+            if platform_id and platform_id not in platform_ids:
+                platform_ids.append(platform_id)
+            self_id = str(
+                getattr(inst, "client_self_id", "")
+                or getattr(inst, "self_id", "")
+                or getattr(inst, "bot_self_id", "")
+                or ""
+            ).strip()
+            if not platform_id or not self_id or not self_id.isdigit():
+                continue
+            priority = 0 if platform_id == "aiocqhttp" else 1
+            candidates.append((priority, platform_id, self_id))
+        if not candidates:
+            configured_self_id = self._configured_bot_self_id()
+            if not configured_self_id:
+                return ""
+            platform_id = platform_ids[0] if platform_ids else "default"
+            return f"{platform_id}:FriendMessage:{configured_self_id}"
+        _, platform_id, self_id = sorted(candidates, key=lambda item: item[0])[0]
+        return f"{platform_id}:FriendMessage:{self_id}"
+
+    def _configured_bot_self_id(self) -> str:
+        config_dir = Path(__file__).resolve().parents[2] / "config"
+        config_files = [
+            config_dir / "astrbot_plugin_live_stream_companion_config.json",
+            config_dir / "astrbot_plugin_llm_executor_config.json",
+            config_dir / "astrbot_plugin_vtube_studio_config.json",
+            config_dir / "astrbot_plugin_qq_group_daily_analysis_config.json",
+        ]
+        for path in config_files:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+            except Exception:
+                continue
+            for key in ("bot_user_id", "bot_self_id", "self_id"):
+                value = str(data.get(key) or "").strip()
+                if value.isdigit():
+                    return value
+            raw_ids = data.get("bot_self_ids")
+            if isinstance(raw_ids, list):
+                for item in raw_ids:
+                    value = str(item or "").strip()
+                    if value.isdigit():
+                        return value
+        return ""
 
     def _bili_auto_reply_priority_types(self) -> set[str]:
         raw = self.config.get(
@@ -1059,7 +1128,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         session_id = await self._get_bili_reply_session()
         if not session_id:
             logger.warning(
-                "[B站直播] 已收到弹幕，但未绑定自动回应会话。请在目标聊天发送 /bili_live_bind_here。"
+                "[B站直播] 已收到弹幕，但未绑定自动回应会话，也未能自动获取 Bot 自己的 QQ。请在目标聊天发送 /bili_live_bind_here。"
             )
             return
 
@@ -1127,10 +1196,22 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         if not reply_text:
             return
 
-        await self.context.send_message(session_id, MessageChain([Plain(reply_text)]))
+        force_voice = bool(self.config.get("bili_live_auto_reply_force_full_tts", True))
+        chain = await self._decorate_bili_live_reply_chain(
+            session_id,
+            [Plain(reply_text)],
+            force_voice=False,
+            skip_subtitle=force_voice,
+        )
+        chain = self._strip_tts_blocks_from_plain_chain(chain)
+        chain = self._ensure_visible_text_after_voice(chain, reply_text)
+        await self.context.send_message(session_id, MessageChain(chain))
         self._bili_last_auto_reply_at = time.time()
         self._record_bili_auto_reply_rate_mark(selected)
-        await self._push_subtitle(reply_text)
+        if not force_voice:
+            await self._push_subtitle(reply_text)
+        if force_voice:
+            asyncio.create_task(self._send_bili_live_tts_followup(session_id, reply_text))
         logger.info(f"[B站直播] 已自动回应弹幕 -> {session_id}: {reply_text}")
 
     async def _dispatch_bili_live_native_event(
@@ -1153,8 +1234,12 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
 
         prompt = (
             "【B站直播间弹幕事件】\n"
-            "请像正常收到这条消息一样，按照你当前的人格、记忆、世界书和所有 AstrBot 插件规则回应直播间观众。\n"
+            "请像正在直播中收到弹幕一样回应直播间观众。\n"
+            "身份边界：下面的用户名是 B站直播间观众昵称，不是当前私聊对象，也不等于私聊历史里的用户或群友；"
+            "不要把私聊记忆、旧对话人物、现实称呼代入当前弹幕。\n"
             "要求：自然回应，不要逐条复读；优先回应具体问题或反馈；不要说自己看不到弹幕；"
+            "如果弹幕只是“摸摸/贴贴/抱抱”这类互动，就直接以主播身份回应这个观众，"
+            "不要说第三个人在摸你，也不要提无关照片、日程或旧聊天。\n"
             "只输出要发给直播间观众的话，不要描述发送状态、处理过程或自己的回应策略。\n\n"
             f"{formatted}"
         )
@@ -1192,6 +1277,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
     async def _reply_to_bili_live_events_via_framework(
         self, events: list[LiveDanmakuEvent], session_id: str
     ) -> bool:
+        started_at = time.perf_counter()
         max_events = max(
             1,
             self._safe_parse_int(self.config.get("bili_live_auto_reply_max_events"), 5),
@@ -1207,22 +1293,31 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             return False
 
         try:
+            t_conv = time.perf_counter()
             curr_cid = await self.context.conversation_manager.get_curr_conversation_id(session_id)
             if not curr_cid:
-                logger.warning(f"[B站直播] 自动回应会话没有活动对话: {session_id}")
-                return False
+                curr_cid = await self.context.conversation_manager.new_conversation(
+                    session_id,
+                    title="B站直播自动回应",
+                )
+                logger.info(f"[B站直播] 已为自动回应会话创建对话: {session_id}")
             conv = await self.context.conversation_manager.get_conversation(session_id, curr_cid)
             if not conv:
                 logger.warning(f"[B站直播] 自动回应会话无法读取对话: {session_id}")
                 return False
+            conv_elapsed = time.perf_counter() - t_conv
         except Exception as e:
             logger.warning(f"[B站直播] 读取自动回应会话对话失败: {e}")
             return False
 
         prompt = (
             "【B站直播间弹幕事件】\n"
-            "请像正常收到这条消息一样，按照你当前的人格、记忆、世界书和所有 AstrBot 插件规则回应直播间观众。\n"
+            "请像正在直播中收到弹幕一样回应直播间观众。\n"
+            "身份边界：下面的用户名是 B站直播间观众昵称，不是当前私聊对象，也不等于私聊历史里的用户或群友；"
+            "不要把私聊记忆、旧对话人物、现实称呼代入当前弹幕。\n"
             "要求：自然回应，不要逐条复读；优先回应具体问题或反馈；不要说自己看不到弹幕；"
+            "如果弹幕只是“摸摸/贴贴/抱抱”这类互动，就直接以主播身份回应这个观众，"
+            "不要说第三个人在摸你，也不要提无关照片、日程或旧聊天。\n"
             "只输出要发给直播间观众的话，不要描述发送状态、处理过程或自己的回应策略。\n\n"
             f"{formatted}"
         )
@@ -1259,6 +1354,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                 conversation=conv,
                 session_id=session_id,
             )
+            t_build = time.perf_counter()
             result = await build_main_agent(
                 event=synthetic_event,
                 plugin_context=self.context,
@@ -1267,24 +1363,49 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             )
             if not result:
                 return False
+            build_elapsed = time.perf_counter() - t_build
             runner = result.agent_runner
+            t_llm = time.perf_counter()
             async for _ in runner.step_until_done(20):
                 pass
+            llm_elapsed = time.perf_counter() - t_llm
             llm_resp = runner.get_final_llm_resp()
             if not llm_resp or llm_resp.role != "assistant":
                 return False
             reply_text = self._clean_auto_reply_text(llm_resp.completion_text or "")
             if not reply_text:
                 return False
+            t_decorate = time.perf_counter()
+            force_voice = bool(self.config.get("bili_live_auto_reply_force_full_tts", True))
             chain = await self._decorate_bili_live_reply_chain(
                 session_id,
                 [Plain(reply_text)],
-                force_voice=bool(self.config.get("bili_live_auto_reply_force_full_tts", True)),
+                force_voice=False,
+                skip_subtitle=force_voice,
             )
+            decorate_elapsed = time.perf_counter() - t_decorate
             chain = self._strip_tts_blocks_from_plain_chain(chain)
+            chain = self._ensure_visible_text_after_voice(chain, reply_text)
+            t_send = time.perf_counter()
             await self.context.send_message(session_id, MessageChain(chain))
+            send_elapsed = time.perf_counter() - t_send
             self._bili_last_auto_reply_at = time.time()
             self._record_bili_auto_reply_rate_mark(events[-max_events:])
+            if not force_voice:
+                await self._push_subtitle(reply_text)
+            if force_voice:
+                asyncio.create_task(self._send_bili_live_tts_followup(session_id, reply_text))
+            total_elapsed = time.perf_counter() - started_at
+            logger.info(
+                "[B站直播] 自动回应耗时: total=%.2fs conv=%.2fs build=%.2fs llm=%.2fs decorate_tts=%.2fs send=%.2fs session=%s",
+                total_elapsed,
+                conv_elapsed,
+                build_elapsed,
+                llm_elapsed,
+                decorate_elapsed,
+                send_elapsed,
+                session_id,
+            )
             logger.info(f"[B站直播] 已通过完整框架链路自动回应弹幕 -> {session_id}: {reply_text}")
             return True
         except Exception as e:
@@ -1292,10 +1413,16 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             return False
 
     async def _decorate_bili_live_reply_chain(
-        self, session_id: str, chain: list[Any], force_voice: bool = False
+        self,
+        session_id: str,
+        chain: list[Any],
+        force_voice: bool = False,
+        skip_subtitle: bool = False,
     ) -> list[Any]:
         if not chain:
             return chain
+        if force_voice:
+            chain = self._wrap_plain_chain_as_tts(chain)
         try:
             session = MessageSession.from_str(session_id)
             message_obj = AstrBotMessage()
@@ -1321,6 +1448,8 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                     id=session.platform_id,
             )
             event = AstrMessageEvent("", message_obj, platform_meta, message_obj.session_id)
+            if skip_subtitle:
+                event.set_extra("bili_live_skip_subtitle", True)
             event.set_result(self._build_message_result_from_chain(chain))
         except Exception as e:
             logger.debug(f"[B站直播] 构造自动回应装饰事件失败，跳过 hooks: {e}")
@@ -1346,7 +1475,165 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                 )
         result = event.get_result()
         processed = getattr(result, "chain", None) if result is not None else None
-        return list(processed or chain)
+        processed_chain = list(processed or chain)
+        if force_voice and not any(isinstance(component, Record) for component in processed_chain):
+            spoken = self._plain_chain_text(processed_chain)
+            record_chain = await self._build_bili_live_tts_chain(session_id, spoken)
+            if record_chain:
+                return record_chain
+        return processed_chain
+
+    async def _send_bili_live_tts_followup(self, session_id: str, text: str) -> None:
+        started_at = time.perf_counter()
+        try:
+            record_chain = await self._build_bili_live_tts_chain(session_id, text)
+            if not record_chain:
+                return
+            await self.context.send_message(session_id, MessageChain(record_chain))
+            logger.info(
+                "[B站直播] 已后台补发直播自动回应 TTS: elapsed=%.2fs session=%s",
+                time.perf_counter() - started_at,
+                session_id,
+            )
+        except Exception as e:
+            logger.warning("[B站直播] 后台补发直播自动回应 TTS 失败: %s", e)
+
+    def _wrap_plain_chain_as_tts(self, chain: list[Any]) -> list[Any]:
+        wrapped: list[Any] = []
+        for component in chain:
+            if isinstance(component, Plain):
+                text = str(getattr(component, "text", "") or "").strip()
+                if text and "<tts" not in text.lower():
+                    wrapped.append(Plain(f"<tts>{text}</tts>"))
+                    continue
+            wrapped.append(component)
+        return wrapped
+
+    def _plain_chain_text(self, chain: list[Any]) -> str:
+        parts: list[str] = []
+        for component in chain:
+            if isinstance(component, Plain):
+                text = str(getattr(component, "text", "") or "").strip()
+                text = self._strip_tts_blocks_from_text(text)
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+
+    async def _build_bili_live_tts_chain(self, session_id: str, text: str) -> list[Any]:
+        spoken = self._strip_tts_blocks_from_text(text)
+        if not spoken:
+            return []
+        try:
+            tts_provider = self.context.get_using_tts_provider(session_id)
+        except Exception as e:
+            logger.warning("[B站直播] 直播自动回应 TTS 生成失败：未找到会话 TTS Provider session=%s err=%s", session_id, e)
+            return []
+        if not tts_provider:
+            logger.warning("[B站直播] 直播自动回应 TTS 生成失败：当前会话未配置 TTS Provider session=%s", session_id)
+            return []
+        convert_started_at = time.perf_counter()
+        spoken = await self._convert_bili_live_tts_spoken_text(session_id, spoken, tts_provider)
+        convert_elapsed = time.perf_counter() - convert_started_at
+        if not spoken:
+            return []
+        try:
+            tts_started_at = time.perf_counter()
+            audio_path = await tts_provider.get_audio(spoken)
+            tts_elapsed = time.perf_counter() - tts_started_at
+        except Exception as e:
+            logger.warning("[B站直播] 直播自动回应 TTS 生成失败: %s", e)
+            return []
+        if not audio_path:
+            logger.warning("[B站直播] 直播自动回应 TTS 生成失败：Provider 未返回音频路径")
+            return []
+        try:
+            record = Record(file=str(audio_path), url=str(audio_path))
+        except TypeError:
+            try:
+                record = Record(file=str(audio_path))
+            except TypeError:
+                record = Record.fromFileSystem(str(audio_path))
+        visible_text = self._strip_tts_blocks_from_text(text)
+        subtitle_text = spoken if bool(self.config.get("subtitle_use_tts_spoken_text", False)) else visible_text
+        subtitle_text = self._strip_tts_blocks_from_text(subtitle_text) or visible_text
+        asyncio.create_task(
+            self._after_bili_live_tts_audio_generated(
+                str(audio_path),
+                spoken,
+                subtitle_text=subtitle_text,
+            )
+        )
+        if not self._companion_tts_live_subtitle_enabled():
+            await self._push_subtitle(subtitle_text)
+        logger.info(
+            "[B站直播] 已生成直播自动回应 TTS: convert=%.2fs provider=%.2fs path=%s text=%s",
+            convert_elapsed,
+            tts_elapsed,
+            audio_path,
+            spoken[:80],
+        )
+        return [record]
+
+    async def _convert_bili_live_tts_spoken_text(
+        self, session_id: str, text: str, tts_provider: Any
+    ) -> str:
+        companion = self._get_private_companion_plugin()
+        if companion is None or not getattr(companion, "enable_tts_enhancement", False):
+            return text
+        convert = getattr(companion, "_convert_text_to_tts_markup", None)
+        normalize_spoken = getattr(companion, "_normalize_tts_spoken_text", None)
+        provider_kind_getter = getattr(companion, "_tts_provider_kind", None)
+        if not callable(convert) or not callable(normalize_spoken):
+            return text
+        event = SimpleNamespace(
+            unified_msg_origin=session_id,
+            message_str=text,
+            message_obj=SimpleNamespace(message=[]),
+            get_sender_id=lambda: "",
+        )
+        try:
+            converted = await convert(text, event, full=True)
+            provider_kind = (
+                provider_kind_getter(tts_provider=tts_provider)
+                if callable(provider_kind_getter)
+                else "generic"
+            )
+            spoken = normalize_spoken(converted, provider_kind=provider_kind)
+            return self._strip_tts_blocks_from_text(spoken) or text
+        except Exception as e:
+            logger.warning("[B站直播] 调用陪伴插件 TTS 文本转换失败，使用原文: %s", e)
+            return text
+
+    def _companion_tts_live_subtitle_enabled(self) -> bool:
+        companion = self._get_private_companion_plugin()
+        return bool(
+            companion is not None
+            and getattr(companion, "enable_tts_live_subtitle_sync", False)
+        )
+
+    async def _after_bili_live_tts_audio_generated(
+        self,
+        audio_path: str,
+        spoken_text: str,
+        *,
+        subtitle_text: str = "",
+    ) -> None:
+        plugin = self._get_private_companion_plugin()
+        after_tts = getattr(plugin, "_after_tts_audio_generated", None) if plugin is not None else None
+        if not callable(after_tts):
+            return
+        try:
+            try:
+                await after_tts(
+                    audio_path,
+                    spoken_text,
+                    source="bili_live_auto_reply",
+                    subtitle_text=subtitle_text,
+                )
+            except TypeError:
+                await after_tts(audio_path, spoken_text)
+        except Exception as e:
+            logger.warning("[B站直播] 调用陪伴插件 TTS 本机联动失败: %s", e)
 
     def _mark_tts_modify_forced_voice(self, event: AstrMessageEvent, handlers: list[Any]) -> None:
         for handler in handlers:
@@ -1500,6 +1787,21 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         if len(lines) == 2 and lines[0] == lines[1]:
             return lines[0]
         return cleaned
+
+    def _ensure_visible_text_after_voice(self, chain: list[Any], reply_text: str) -> list[Any]:
+        visible_text = self._dedupe_repeated_plain_text(self._strip_tts_blocks_from_text(reply_text))
+        if not visible_text or not any(isinstance(component, Record) for component in chain):
+            return chain
+        existing_plain = [
+            self._dedupe_repeated_plain_text(
+                self._strip_tts_blocks_from_text(getattr(component, "text", "") or "")
+            )
+            for component in chain
+            if isinstance(component, Plain)
+        ]
+        if any(text == visible_text for text in existing_plain if text):
+            return chain
+        return [*chain, Plain(visible_text)]
 
     def _is_bili_live_running(self) -> bool:
         return bool(self._bili_live_task and not self._bili_live_task.done())
@@ -1948,10 +2250,98 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         self, events: list[LiveDanmakuEvent]
     ) -> str:
         parts = [
+            self._build_bili_live_continuity_context(events),
             self._build_live_stream_memory_context(events),
             self._build_private_companion_live_context(events),
         ]
         return "\n\n".join(part for part in parts if part)
+
+    def _build_bili_live_continuity_context(
+        self, events: list[LiveDanmakuEvent]
+    ) -> str:
+        if not events:
+            return ""
+        session_events = [
+            item
+            for item in self._bili_session_events
+            if item.event_type in {"danmaku", "gift", "super_chat", "buy_guard", "follow", "enter_room"}
+        ]
+        if len(session_events) <= len(events):
+            return ""
+
+        current_keys = {
+            (item.event_type, item.username, item.content, int(item.ts * 1000))
+            for item in events
+        }
+        current_names: list[str] = []
+        for item in events:
+            name = self._single_line_text(item.username, 40)
+            if name and name != "系统" and name not in current_names:
+                current_names.append(name)
+
+        lines: list[str] = []
+        max_viewers = max(
+            1,
+            self._safe_parse_int(
+                self.config.get("bili_live_continuity_context_max_viewers"),
+                3,
+            ),
+        )
+        max_per_viewer = max(
+            1,
+            self._safe_parse_int(
+                self.config.get("bili_live_continuity_context_per_viewer"),
+                4,
+            ),
+        )
+        now = time.time()
+        for name in current_names[:max_viewers]:
+            prior: list[LiveDanmakuEvent] = []
+            for item in reversed(session_events):
+                key = (item.event_type, item.username, item.content, int(item.ts * 1000))
+                if key in current_keys:
+                    continue
+                if item.username != name:
+                    continue
+                if item.event_type not in {"danmaku", "gift", "super_chat", "buy_guard"}:
+                    continue
+                prior.append(item)
+                if len(prior) >= max_per_viewer:
+                    break
+            if not prior:
+                continue
+            snippets = []
+            for item in reversed(prior):
+                age = max(0, int(now - item.ts))
+                snippets.append(
+                    f"{age}秒前{item.event_type}: {self._single_line_text(item.content, 48)}"
+                )
+            lines.append(f"- {name} 本场前文：" + "；".join(snippets))
+
+        recent_room = []
+        for item in reversed(session_events):
+            key = (item.event_type, item.username, item.content, int(item.ts * 1000))
+            if key in current_keys:
+                continue
+            if item.event_type != "danmaku":
+                continue
+            text = self._single_line_text(item.display_text(), 64)
+            if text:
+                recent_room.append(text)
+            if len(recent_room) >= 5:
+                break
+        if recent_room:
+            lines.append("- 直播间刚聊过：" + "；".join(reversed(recent_room)))
+
+        if not lines:
+            return ""
+        return (
+            "## 本场连续对话上下文\n"
+            "下面是直播间本场已经发生过的近距离互动，用于承接同一观众的前文。"
+            "如果当前弹幕像是在接着聊，请直接顺着前文回应；不要把连续发言当作观众刚来，"
+            "也不要机械复述这些上下文。\n"
+            + "\n".join(lines)
+        )
 
     def _build_live_stream_memory_context(
         self, events: list[LiveDanmakuEvent]
@@ -3236,6 +3626,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                 f"直播状态：{info.get('live_status')}（0未开播，1直播中，2轮播）",
                 f"房间接口：code={info.get('room_init_code')} message={info.get('room_init_message')}",
                 f"弹幕接口：code={info.get('danmu_info_code')} message={info.get('danmu_info_message')}",
+                f"弹幕风控：{'是' if info.get('danmu_risk_control') else '否'}",
                 f"弹幕 token：{'有' if info.get('danmu_token_present') else '无'}",
                 f"弹幕服务器数：{info.get('danmu_host_count')}",
                 f"服务器示例：{', '.join(info.get('danmu_hosts') or []) or '无'}",
@@ -3408,6 +3799,8 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             await self._start_mouth_sync_for_result(result)
 
         if not self._is_subtitle_enabled():
+            return
+        if bool(event.get_extra("bili_live_skip_subtitle")):
             return
         if getattr(result, "__vts_subtitle_processed", False):
             return
@@ -3811,3 +4204,6 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             return f"❌ 连接已断开：{e}"
         except Exception as e:
             return f"❌ 获取模型信息失败：{e}"
+
+
+

@@ -58,7 +58,7 @@ class LiveStreamCompanionPageApi:
                     "plugin": {
                         "name": PLUGIN_NAME,
                         "display_name": "我会直播圈米养你",
-                        "version": "1.5.0",
+                        "version": "1.6.0",
                     },
                     "live": self._live_summary(events, session_events),
                     "obs_control": await self._obs_control_status(check_obs_ws=True),
@@ -631,3 +631,4 @@ class LiveStreamCompanionPageApi:
     @staticmethod
     def _error(message: str) -> dict[str, Any]:
         return {"success": False, "error": str(message), "ts": int(time.time())}
+

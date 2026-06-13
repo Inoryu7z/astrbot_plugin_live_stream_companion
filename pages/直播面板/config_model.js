@@ -1,4 +1,4 @@
-﻿const FALLBACK_CONFIG_GROUPS = [
+const FALLBACK_CONFIG_GROUPS = [
   {
     id: "live",
     title: "直播监听",
@@ -112,6 +112,7 @@
       "subtitle_strip_tts_blocks",
       "subtitle_voice_use_following_plain",
       "subtitle_prefer_chinese_text",
+      "subtitle_use_tts_spoken_text",
       "subtitle_strip_html_tags",
     ],
   },
@@ -139,7 +140,7 @@ const FALLBACK_CONFIG_SCHEMA = {
   bilibili_room_id: { description: "B站直播房间号", type: "int", default: 0 },
   part_id: { description: "B站直播父分区 ID", type: "int", default: 0 },
   area_id: { description: "B站直播子分区 ID", type: "int", default: 0 },
-  bilibili_web_backend: { description: "B站 Web 弹幕后端", type: "string", default: "laplace", options: ["laplace", "blivedm", "builtin"] },
+  bilibili_web_backend: { description: "B站 Web 弹幕后端", type: "string", default: "builtin", options: ["builtin", "history", "laplace", "blivedm"] },
   laplace_event_bridge_url: { description: "Laplace Event Bridge 地址", type: "string", default: "ws://localhost:9696" },
   laplace_event_bridge_token: { description: "Laplace Event Bridge 密码", type: "string", default: "" },
   bilibili_sessdata: { description: "B站 Cookie / SESSDATA", type: "string", default: "" },
@@ -218,6 +219,7 @@ const FALLBACK_CONFIG_SCHEMA = {
   subtitle_strip_tts_blocks: { description: "字幕移除 TTS 语音段", type: "bool", default: true },
   subtitle_voice_use_following_plain: { description: "语音消息只显示后续文本", type: "bool", default: true },
   subtitle_prefer_chinese_text: { description: "字幕优先提取中文", type: "bool", default: true },
+  subtitle_use_tts_spoken_text: { description: "直播 TTS 字幕显示朗读文本", type: "bool", default: false },
   subtitle_strip_html_tags: { description: "字幕清理尖括号标签", type: "bool", default: true },
 
   mouth_sync_enabled: { description: "启用 TTS 语音嘴型联动", type: "bool", default: false },
@@ -230,4 +232,6 @@ const FALLBACK_CONFIG_SCHEMA = {
   mouth_sync_form_strength: { description: "嘴型变形强度", type: "float", default: 0.18, slider: { min: 0, max: 1, step: 0.05 } },
   mouth_sync_mode: { description: "参数注入模式", type: "string", default: "set", options: ["set", "add"] },
 };
+
+
 
