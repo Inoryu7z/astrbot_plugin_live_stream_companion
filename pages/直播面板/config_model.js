@@ -92,6 +92,7 @@ const FALLBACK_CONFIG_GROUPS = [
     description: "OBS overlay 的服务地址、打字速度、样式和文本清理规则。",
     keys: [
       "subtitle_enabled",
+      "subtitle_scope",
       "subtitle_host",
       "subtitle_port",
       "subtitle_typing_speed_ms",
@@ -199,6 +200,7 @@ const FALLBACK_CONFIG_SCHEMA = {
   private_companion_live_summary_enabled: { description: "下播生成直播小结", type: "bool", default: true },
 
   subtitle_enabled: { description: "启用打字机字幕 overlay", type: "bool", default: false },
+  subtitle_scope: { description: "打字机字幕触发范围", type: "string", default: "all", options: ["all", "bili_live"] },
   subtitle_host: { description: "字幕服务监听地址", type: "string", default: "127.0.0.1" },
   subtitle_port: { description: "字幕服务端口", type: "int", default: 18081 },
   subtitle_typing_speed_ms: { description: "打字速度（毫秒/字）", type: "int", default: 45, slider: { min: 5, max: 200, step: 5 } },

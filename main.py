@@ -102,7 +102,7 @@ class SyntheticBiliLiveWakeEvent(AstrMessageEvent):
     "astrbot_plugin_live_stream_companion",
     "menglimi",
     "B 站直播弹幕读取、自动回应、Live2D 表情动作、OBS 字幕和 TTS 嘴型联动",
-    "1.6.0",
+    "1.6.1",
     "https://github.com/menglimi/astrbot_plugin_live_stream_companion",
 )
 class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
@@ -1879,11 +1879,29 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         return list(dict.fromkeys(tokens))
 
     def _match_private_companion_member(
-        self, plugin: Any, live_username: str
+        self, plugin: Any, live_username: str, event: LiveDanmakuEvent | None = None
     ) -> dict[str, Any] | None:
         name = self._single_line_text(live_username, 60)
         if not name:
             return None
+        external_ids = self._private_companion_live_external_ids(live_username, event)
+
+        data = getattr(plugin, "data", None)
+        profiles = data.get("worldbook_member_profiles") if isinstance(data, dict) else None
+        if isinstance(profiles, dict):
+            for user_id, profile in profiles.items():
+                if not isinstance(profile, dict) or not profile.get("enabled", True):
+                    continue
+                profile_ids = {str(user_id)}
+                raw_external = profile.get("external_ids")
+                if isinstance(raw_external, list):
+                    profile_ids.update(str(item).strip() for item in raw_external if str(item).strip())
+                for key in ("linked_bili_profile_id", "live_profile_id"):
+                    value = str(profile.get(key) or "").strip()
+                    if value:
+                        profile_ids.add(value)
+                if external_ids & profile_ids:
+                    return self._private_companion_linked_match(plugin, str(user_id), profile)
 
         resolver = getattr(plugin, "_resolve_worldbook_member_by_name", None)
         if callable(resolver):
@@ -1894,8 +1912,6 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             except Exception as e:
                 logger.debug(f"[B站直播] 调用陪伴插件关系网匹配失败: {e}")
 
-        data = getattr(plugin, "data", None)
-        profiles = data.get("worldbook_member_profiles") if isinstance(data, dict) else None
         if not isinstance(profiles, dict):
             return None
         name_lower = name.lower()
@@ -1938,6 +1954,60 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             ),
             "source": "worldbook",
         })
+
+    def _private_companion_live_external_ids(
+        self, live_username: str, event: LiveDanmakuEvent | None = None
+    ) -> set[str]:
+        username = self._single_line_text(live_username, 60)
+        ids = {f"live:{username}"} if username else set()
+        raw = getattr(event, "raw", None) if event is not None else None
+        uid = self._bili_event_uid(raw)
+        if uid:
+            ids.add(f"bili:{uid}")
+        return ids
+
+    def _private_companion_linked_match(
+        self, plugin: Any, user_id: str, profile: dict[str, Any]
+    ) -> dict[str, Any]:
+        linked_id = str(profile.get("linked_qq_user_id") or profile.get("merged_into_user_id") or "").strip()
+        if linked_id:
+            linked_profile = self._private_companion_profile_by_user_id(plugin, linked_id)
+            if isinstance(linked_profile, dict) and linked_profile.get("enabled", True):
+                return self._augment_private_companion_match(plugin, {
+                    "user_id": linked_id,
+                    "name": self._single_line_text(linked_profile.get("name"), 60) or linked_id,
+                    "source": "worldbook_external_bind",
+                })
+        return self._augment_private_companion_match(plugin, {
+            "user_id": user_id,
+            "name": self._single_line_text(profile.get("name"), 60) or user_id,
+            "source": "worldbook_external",
+        })
+
+    @staticmethod
+    def _bili_event_uid(raw: Any) -> str:
+        if not isinstance(raw, dict):
+            return ""
+        candidates: list[Any] = [
+            raw.get("uid"),
+            raw.get("user_id"),
+            raw.get("mid"),
+        ]
+        for key in ("user", "user_info", "info", "data"):
+            value = raw.get(key)
+            if isinstance(value, dict):
+                candidates.extend([value.get("uid"), value.get("user_id"), value.get("mid")])
+            elif isinstance(value, list):
+                for item in value[:4]:
+                    if isinstance(item, dict):
+                        candidates.extend([item.get("uid"), item.get("user_id"), item.get("mid")])
+                    elif isinstance(item, (int, str)):
+                        candidates.append(item)
+        for value in candidates:
+            text = str(value or "").strip()
+            if text.isdigit() and int(text) > 0:
+                return text
+        return ""
 
     def _private_companion_profile_by_user_id(
         self, plugin: Any, user_id: str
@@ -2088,7 +2158,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                 "like",
             }:
                 continue
-            match = self._match_private_companion_member(plugin, live_event.username)
+            match = self._match_private_companion_member(plugin, live_event.username, live_event)
             if not match:
                 activity = self._private_companion_viewer_activity_for_context(
                     plugin, live_event.username
@@ -2527,7 +2597,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             if not username or username in seen or username in {"系统"}:
                 continue
             seen.add(username)
-            match = self._match_private_companion_member(plugin, username)
+            match = self._match_private_companion_member(plugin, username, live_event)
             user_id = str((match or {}).get("user_id") or "").strip()
             activity = self._private_companion_viewer_activity_for_context(
                 plugin, username, user_id=user_id
@@ -2644,7 +2714,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         self, plugin: Any, event: LiveDanmakuEvent, event_key: str
     ) -> bool:
         changed = False
-        match = self._match_private_companion_member(plugin, event.username)
+        match = self._match_private_companion_member(plugin, event.username, event)
         writeback_enabled = self._private_companion_writeback_enabled()
         if self.config.get("private_companion_viewer_activity_enabled", True):
             changed = self._record_private_companion_viewer_activity(
@@ -3179,7 +3249,9 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         if item.get("profile_id") or item["count"] < min_events:
             return True
 
-        profile_id = "bili_live_" + uuid.uuid5(uuid.NAMESPACE_URL, username).hex[:16]
+        bili_uid = self._bili_event_uid(event.raw)
+        external_ids = self._private_companion_live_external_ids(username, event)
+        profile_id = f"bili:{bili_uid}" if bili_uid else "bili_live_" + uuid.uuid5(uuid.NAMESPACE_URL, username).hex[:16]
         data = getattr(plugin, "data", None)
         profiles = data.setdefault("worldbook_member_profiles", {}) if isinstance(data, dict) else {}
         if not isinstance(profiles, dict):
@@ -3187,9 +3259,11 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         if profile_id not in profiles:
             profiles[profile_id] = {
                 "user_id": profile_id,
+                "identity_type": "external",
                 "name": username,
                 "aliases": [],
                 "observed_names": [username],
+                "external_ids": sorted(external_ids),
                 "content": f"B站直播间观众，直播用户名 {username}。身份尚未与 QQ 号确认。",
                 "identity_note": f"B站直播间观众，直播用户名 {username}；可能需要后续人工合并到真实关系节点。",
                 "boundary_note": "直播身份为候选登记，不要在公开场景提及内部匹配或关系网。",
@@ -3215,6 +3289,22 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
                 "manual_edit_ts": time.time(),
             }
             logger.info("[B站直播] 已自动登记直播观众候选关系: %s", username)
+        else:
+            profile = profiles.get(profile_id)
+            if isinstance(profile, dict):
+                profile["identity_type"] = "external"
+                ids = profile.setdefault("external_ids", [])
+                if not isinstance(ids, list):
+                    ids = []
+                    profile["external_ids"] = ids
+                for ext in sorted(external_ids):
+                    if ext not in ids:
+                        ids.append(ext)
+                if username not in (profile.get("observed_names") if isinstance(profile.get("observed_names"), list) else []):
+                    observed = profile.setdefault("observed_names", [])
+                    if isinstance(observed, list):
+                        observed.insert(0, username)
+                        del observed[8:]
         item["profile_id"] = profile_id
         return True
 
@@ -3801,6 +3891,8 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         if not self._is_subtitle_enabled():
             return
         if bool(event.get_extra("bili_live_skip_subtitle")):
+            return
+        if not self._event_should_push_subtitle(event):
             return
         if getattr(result, "__vts_subtitle_processed", False):
             return

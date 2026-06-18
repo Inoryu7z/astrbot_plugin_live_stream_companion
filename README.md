@@ -4,18 +4,11 @@
 
 - 插件名：`astrbot_plugin_live_stream_companion`
 - 中文名：`我会直播圈米养你`
-- 当前版本：`1.6.0`
+- 当前版本：`1.6.1`
 - 适配平台：`aiocqhttp` / OneBot v11
 - AstrBot 版本：`>=4.16,<5`
 - 编码要求：UTF-8
 
-## 1.6.0 整合更新
-
-本版本把近期围绕 B 站直播监听、自动回应、TTS 和打字机字幕的细碎补丁统一收束为一个稳定版本。B 站 Web 后端新增 `history` 模式，可只使用历史弹幕轮询，避开 `getDanmuInfo -352` 风控时的 websocket 弹幕服务器信息请求；`builtin` 仍保留 websocket + 历史轮询兜底。
-
-直播自动回应链路改为先发送中文可见回复，再后台生成和补发语音，避免 TTS 生成阻塞直播互动。TTS 朗读稿和可见字幕文本已分离：默认 QQ 可见文本和打字机字幕保持中文直播回复；如果开启 `subtitle_use_tts_spoken_text`，打字机字幕会改为显示实际送入 TTS 的日语、英语或中文朗读文本。强制语音场景下，先发文字会跳过字幕 hook，只在语音补发/播放阶段推送一次打字机字幕，避免重复打字机。
-
-自动回应默认可使用 Bot 自己的私聊会话，并补强了直播观众身份边界提示，避免把直播昵称误判成私聊用户或群友。直播 TTS 联动会标记来源，只让直播自动回应触发本机播放和直播 overlay，普通聊天语音不会串到直播字幕或本机播放。
 ## 这插件能做什么
 
 你可以把它理解成一条直播链路：
@@ -155,6 +148,7 @@ bili_live_auto_reply_mode = native
 
 ```text
 subtitle_enabled = true
+subtitle_scope = all
 subtitle_host = 127.0.0.1
 subtitle_port = 18081
 ```
@@ -174,6 +168,14 @@ http://127.0.0.1:18081/
 ```
 
 字幕会自动清理 `<l2d:...>`、TTS 控制块和常见 HTML/尖括号标签，避免控制指令出现在画面上。
+
+如果不希望普通聊天回复都进入 OBS 打字机，把触发范围改成：
+
+```text
+subtitle_scope = bili_live
+```
+
+这样只有 B 站直播自动回应和直播 TTS 字幕会推送到打字机，普通 Bot 聊天不会显示在 OBS 字幕层。
 
 ### 6. 接上 TTS 嘴型
 
@@ -380,6 +382,7 @@ bilibili_ROOM_OWNER_AUTH_CODE
 | 配置 | 默认 | 说明 |
 |---|---:|---|
 | `subtitle_enabled` | `false` | 启用透明字幕层 |
+| `subtitle_scope` | `all` | `all` 显示所有 Bot 回复，`bili_live` 只显示直播自动回应 |
 | `subtitle_port` | `18081` | 字幕网页端口 |
 | `obs_control_enabled` | `false` | 启用 OBS 控制 |
 | `obs_allow_stream_start` | `false` | 是否允许插件调用 OBS 推流 |

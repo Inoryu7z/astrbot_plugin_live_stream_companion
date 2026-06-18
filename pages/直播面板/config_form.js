@@ -115,6 +115,7 @@ const LiveConfigForm = (() => {
     const options = {
       bilibili_type: ["web", "laplace", "open_live"],
       bili_live_auto_reply_mode: ["native", "direct"],
+      subtitle_scope: ["all", "bili_live"],
       subtitle_position: ["bottom", "center", "top"],
       mouth_sync_mode: ["set", "add"],
     };

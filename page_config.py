@@ -192,6 +192,7 @@ class PageConfigManager:
             "private_companion_live_state_duration_hours",
             "private_companion_live_summary_enabled",
             "subtitle_enabled",
+            "subtitle_scope",
             "subtitle_host",
             "subtitle_port",
             "subtitle_typing_speed_ms",
@@ -321,6 +322,7 @@ class PageConfigManager:
                 "description": "OBS overlay 样式、清理规则和页面预览。",
                 "keys": [
                     "subtitle_enabled",
+                    "subtitle_scope",
                     "subtitle_host",
                     "subtitle_port",
                     "subtitle_typing_speed_ms",

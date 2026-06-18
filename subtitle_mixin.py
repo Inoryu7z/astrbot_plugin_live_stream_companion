@@ -20,6 +20,15 @@ class SubtitleMixin:
     def _is_subtitle_enabled(self) -> bool:
         return bool(self.config.get("subtitle_enabled", False))
 
+    def _subtitle_scope(self) -> str:
+        scope = str(self.config.get("subtitle_scope") or "all").strip().lower()
+        return scope if scope in {"all", "bili_live"} else "all"
+
+    def _event_should_push_subtitle(self, event: Any) -> bool:
+        if self._subtitle_scope() == "all":
+            return True
+        return bool(event.get_extra("bili_live_auto_reply"))
+
     def _get_subtitle_style(self) -> dict[str, Any]:
         return {
             "typing_speed_ms": max(
