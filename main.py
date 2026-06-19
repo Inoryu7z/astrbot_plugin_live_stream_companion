@@ -102,7 +102,7 @@ class SyntheticBiliLiveWakeEvent(AstrMessageEvent):
     "astrbot_plugin_live_stream_companion",
     "menglimi",
     "B 站直播弹幕读取、自动回应、Live2D 表情动作、OBS 字幕和 TTS 嘴型联动",
-    "1.6.1",
+    "1.6.2",
     "https://github.com/menglimi/astrbot_plugin_live_stream_companion",
 )
 class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
@@ -314,7 +314,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         if not self._is_subtitle_enabled():
             yield event.plain_result("字幕功能未启用，请先在插件配置中开启 subtitle_enabled。")
             return
-        await self._push_subtitle(text or "这是一条打字机字幕测试。")
+        await self._push_subtitle(text or "这是一条打字机字幕测试。", source="manual")
         yield event.plain_result("已发送字幕测试。")
 
     @filter.command("subtitle_clear")
@@ -1209,7 +1209,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         self._bili_last_auto_reply_at = time.time()
         self._record_bili_auto_reply_rate_mark(selected)
         if not force_voice:
-            await self._push_subtitle(reply_text)
+            await self._push_subtitle(reply_text, source="bili_live")
         if force_voice:
             asyncio.create_task(self._send_bili_live_tts_followup(session_id, reply_text))
         logger.info(f"[B站直播] 已自动回应弹幕 -> {session_id}: {reply_text}")
@@ -1392,7 +1392,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             self._bili_last_auto_reply_at = time.time()
             self._record_bili_auto_reply_rate_mark(events[-max_events:])
             if not force_voice:
-                await self._push_subtitle(reply_text)
+                await self._push_subtitle(reply_text, source="bili_live")
             if force_voice:
                 asyncio.create_task(self._send_bili_live_tts_followup(session_id, reply_text))
             total_elapsed = time.perf_counter() - started_at
@@ -1564,7 +1564,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             )
         )
         if not self._companion_tts_live_subtitle_enabled():
-            await self._push_subtitle(subtitle_text)
+            await self._push_subtitle(subtitle_text, source="bili_live")
         logger.info(
             "[B站直播] 已生成直播自动回应 TTS: convert=%.2fs provider=%.2fs path=%s text=%s",
             convert_elapsed,
@@ -3900,7 +3900,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         setattr(result, "__vts_subtitle_processed", True)
 
         text = self._extract_subtitle_text_from_result(result)
-        await self._push_subtitle(text)
+        await self._push_subtitle(text, source="bili_live" if event.get_extra("bili_live_auto_reply") else "")
 
     @filter.command("vts_l2d_list")
     async def cmd_vts_l2d_list(self, event: AstrMessageEvent):

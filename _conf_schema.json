@@ -745,12 +745,12 @@
   "subtitle_scope": {
     "description": "打字机字幕触发范围",
     "type": "string",
-    "hint": "all 表示所有 Bot 最终回复都会推送到字幕；bili_live 表示只推送 B站直播自动回应和直播 TTS 字幕。",
+    "hint": "bili_live 表示只推送 B站直播自动回应、直播 TTS、手动测试和预览；all 表示所有 Bot 最终回复都会推送到字幕。",
     "options": [
       "all",
       "bili_live"
     ],
-    "default": "all"
+    "default": "bili_live"
   },
   "subtitle_host": {
     "description": "字幕服务监听地址",

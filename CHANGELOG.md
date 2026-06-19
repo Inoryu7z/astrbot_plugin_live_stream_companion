@@ -1,10 +1,18 @@
 # 更改记录
 
+## 1.6.2
+
+- 修复普通 QQ 消息仍可能进入 OBS 打字机字幕的问题。
+- 将 `subtitle_scope` 的默认值调整为 `bili_live`，默认只允许 B 站直播自动回应、直播 TTS、手动测试和拓展页预览推送字幕。
+- 将字幕来源校验下沉到 `_push_subtitle()` 本身，并要求直播/手动/预览路径显式传入来源，避免外部插件或直接调用绕过回复 hook。
+- 更新 README 和配置页 fallback 默认值，明确 `all` 是兼容旧行为，只有显式选择时才会让所有 Bot 回复进入打字机。
+
 ## 1.6.1
 
 - 新增 `subtitle_scope` 配置，可选择 OBS 打字机字幕触发范围：
-  - `all`：保持旧行为，所有 Bot 最终回复都会推送到字幕层。
-  - `bili_live`：只推送 B 站直播自动回应和直播 TTS 字幕，普通聊天不会显示到 OBS 字幕层。
+  - `bili_live`：默认安全模式，只推送 B 站直播自动回应、直播 TTS 字幕、手动测试和拓展页预览，普通 QQ 聊天不会显示到 OBS 字幕层。
+  - `all`：兼容旧行为，所有 Bot 最终回复都会推送到字幕层。
+- 将字幕来源校验下沉到 `_push_subtitle`，避免外部插件或直接调用绕过回复 hook，把普通 QQ 消息推到直播字幕。
 - 梳理直播间自动回应体验。当前直播回复会注入本场连续上下文、直播记忆、观众活跃画像和陪伴插件关系网线索；这些线索能增强承接感，但也可能让模型过度熟人寒暄。若出现每次都像“好久不见”的口吻，可优先关闭 `private_companion_viewer_activity_context_enabled`、`private_companion_live_context_enabled` 或 `live_memory_context_enabled`。
 
 ## 1.6.0

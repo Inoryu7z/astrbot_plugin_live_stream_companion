@@ -21,13 +21,18 @@ class SubtitleMixin:
         return bool(self.config.get("subtitle_enabled", False))
 
     def _subtitle_scope(self) -> str:
-        scope = str(self.config.get("subtitle_scope") or "all").strip().lower()
+        scope = str(self.config.get("subtitle_scope") or "bili_live").strip().lower()
         return scope if scope in {"all", "bili_live"} else "all"
 
     def _event_should_push_subtitle(self, event: Any) -> bool:
         if self._subtitle_scope() == "all":
             return True
         return bool(event.get_extra("bili_live_auto_reply"))
+
+    def _source_should_push_subtitle(self, source: str = "") -> bool:
+        if self._subtitle_scope() == "all":
+            return True
+        return str(source or "").strip().lower() in {"bili_live", "manual", "preview"}
 
     def _get_subtitle_style(self) -> dict[str, Any]:
         return {
@@ -97,8 +102,11 @@ class SubtitleMixin:
             cleaned = cleaned[:max_length].rstrip() + "..."
         return cleaned
 
-    async def _push_subtitle(self, text: str) -> None:
+    async def _push_subtitle(self, text: str, *, source: str = "") -> None:
         if not self._is_subtitle_enabled():
+            return
+        if not self._source_should_push_subtitle(source):
+            logger.debug("[字幕] 当前 subtitle_scope=bili_live，已跳过非直播字幕来源。")
             return
         if not self._subtitle_server:
             await self._start_subtitle_server_if_enabled()

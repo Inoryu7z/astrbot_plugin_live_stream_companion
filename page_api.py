@@ -58,7 +58,7 @@ class LiveStreamCompanionPageApi:
                     "plugin": {
                         "name": PLUGIN_NAME,
                         "display_name": "我会直播圈米养你",
-                        "version": "1.6.1",
+                        "version": "1.6.2",
                     },
                     "live": self._live_summary(events, session_events),
                     "obs_control": await self._obs_control_status(check_obs_ws=True),
@@ -135,7 +135,7 @@ class LiveStreamCompanionPageApi:
                         "style": self.plugin._get_subtitle_style(),
                     }
                 )
-            await self.plugin._push_subtitle(text)
+            await self.plugin._push_subtitle(text, source="preview")
             return self._ok(
                 {
                     "sent": True,

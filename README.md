@@ -4,7 +4,7 @@
 
 - 插件名：`astrbot_plugin_live_stream_companion`
 - 中文名：`我会直播圈米养你`
-- 当前版本：`1.6.1`
+- 当前版本：`1.6.2`
 - 适配平台：`aiocqhttp` / OneBot v11
 - AstrBot 版本：`>=4.16,<5`
 - 编码要求：UTF-8
@@ -148,7 +148,7 @@ bili_live_auto_reply_mode = native
 
 ```text
 subtitle_enabled = true
-subtitle_scope = all
+subtitle_scope = bili_live
 subtitle_host = 127.0.0.1
 subtitle_port = 18081
 ```
@@ -169,13 +169,13 @@ http://127.0.0.1:18081/
 
 字幕会自动清理 `<l2d:...>`、TTS 控制块和常见 HTML/尖括号标签，避免控制指令出现在画面上。
 
-如果不希望普通聊天回复都进入 OBS 打字机，把触发范围改成：
+默认 `subtitle_scope=bili_live` 时，只有 B 站直播自动回应、直播 TTS 字幕、手动测试和拓展页预览会进入 OBS 打字机，普通 QQ 聊天不会显示在直播字幕层。
+
+如果你确实希望所有 Bot 回复都进入 OBS 打字机，可以把触发范围改成：
 
 ```text
-subtitle_scope = bili_live
+subtitle_scope = all
 ```
-
-这样只有 B 站直播自动回应和直播 TTS 字幕会推送到打字机，普通 Bot 聊天不会显示在 OBS 字幕层。
 
 ### 6. 接上 TTS 嘴型
 
@@ -382,7 +382,7 @@ bilibili_ROOM_OWNER_AUTH_CODE
 | 配置 | 默认 | 说明 |
 |---|---:|---|
 | `subtitle_enabled` | `false` | 启用透明字幕层 |
-| `subtitle_scope` | `all` | `all` 显示所有 Bot 回复，`bili_live` 只显示直播自动回应 |
+| `subtitle_scope` | `bili_live` | `bili_live` 只显示直播自动回应，`all` 显示所有 Bot 回复 |
 | `subtitle_port` | `18081` | 字幕网页端口 |
 | `obs_control_enabled` | `false` | 启用 OBS 控制 |
 | `obs_allow_stream_start` | `false` | 是否允许插件调用 OBS 推流 |
