@@ -653,6 +653,118 @@
     "hint": "控制 Bot 回应直播弹幕时的语气和角色",
     "default": "你是正在直播中的虚拟主播助手。请根据观众最近的弹幕自然回应，语气像实时聊天，不要逐条复读。"
   },
+  "screenshot_narration_enabled": {
+    "description": "启用直播画面截图解说",
+    "type": "bool",
+    "hint": "开启后，插件会周期性截取当前显示器画面，发送给视觉 LLM 生成场景描述和解说候选，并注入到直播自动回应的辅助上下文里。要求所用 LLM Provider 支持图片输入，并安装 mss、Pillow 依赖",
+    "default": false
+  },
+  "screenshot_narration_interval_seconds": {
+    "description": "截图解说间隔",
+    "type": "float",
+    "hint": "两次自动截图解说的间隔秒数，最小 10 秒。直播监听未运行时会自动跳过本轮以节省 token",
+    "slider": {
+      "min": 10,
+      "max": 600,
+      "step": 5
+    },
+    "default": 60
+  },
+  "screenshot_narration_initial_delay_seconds": {
+    "description": "启动后首次截图延迟",
+    "type": "float",
+    "hint": "插件启动后等待多少秒再开始第一次截图，避免和初始化挤在一起",
+    "slider": {
+      "min": 2,
+      "max": 120,
+      "step": 1
+    },
+    "default": 8
+  },
+  "screenshot_narration_monitor_index": {
+    "description": "显示器索引",
+    "type": "int",
+    "hint": "0 表示主显示器，1 表示第二显示器，以此类推。超出范围会回退到主显示器",
+    "slider": {
+      "min": 0,
+      "max": 5,
+      "step": 1
+    },
+    "default": 0
+  },
+  "screenshot_narration_max_image_width": {
+    "description": "截图最大宽度",
+    "type": "int",
+    "hint": "发送给 LLM 前下采样到的最大宽度（像素），用于控制 token 用量。原图更宽时会等比缩小",
+    "slider": {
+      "min": 320,
+      "max": 2560,
+      "step": 40
+    },
+    "default": 1280
+  },
+  "screenshot_narration_jpeg_quality": {
+    "description": "截图 JPEG 质量",
+    "type": "int",
+    "hint": "保存截图时使用的 JPEG 质量，越低文件越小但画面越糊。建议 60-80",
+    "slider": {
+      "min": 20,
+      "max": 95,
+      "step": 5
+    },
+    "default": 70
+  },
+  "screenshot_narration_session_id": {
+    "description": "视觉 LLM 会话ID",
+    "type": "string",
+    "hint": "可留空。留空时按顺序回退：自动回应会话 -> 全局默认 Provider。填写后会用该会话的 Provider 调用视觉 LLM，便于单独绑定支持图片的模型",
+    "default": ""
+  },
+  "screenshot_narration_system_prompt": {
+    "description": "截图解说系统提示词",
+    "type": "text",
+    "hint": "控制视觉 LLM 生成解说时的角色和风格",
+    "default": "你是一个直播画面解说助手。根据用户提供的直播画面截图，客观描述画面里能看到的内容，并给出几条自然口语化的解说候选，供直播陪聊角色参考。不要编造画面外的细节。"
+  },
+  "screenshot_narration_candidate_count": {
+    "description": "解说候选条数",
+    "type": "int",
+    "hint": "每次截图生成多少条解说候选，1-5 条",
+    "slider": {
+      "min": 1,
+      "max": 5,
+      "step": 1
+    },
+    "default": 3
+  },
+  "screenshot_narration_max_history": {
+    "description": "解说缓存条数",
+    "type": "int",
+    "hint": "内存中保留最近多少条解说结果，用于注入辅助上下文。超过会丢弃最旧的",
+    "slider": {
+      "min": 2,
+      "max": 30,
+      "step": 1
+    },
+    "default": 6
+  },
+  "screenshot_narration_context_enabled": {
+    "description": "注入截图解说上下文",
+    "type": "bool",
+    "hint": "开启后，直播自动回应会把最近一次截图解说的场景描述和解说候选作为辅助上下文注入给 LLM，让回应能自然承接画面",
+    "default": true
+  },
+  "screenshot_narration_context_max_age_seconds": {
+    "description": "截图上下文有效时间",
+    "type": "float",
+    "hint": "只引用该时间范围内的截图解说。超过会跳过，避免引用过时画面。设为 0 表示不限制",
+    "slider": {
+      "min": 0,
+      "max": 1800,
+      "step": 10
+    },
+    "default": 180
+  },
   "mouth_sync_enabled": {
     "description": "启用 TTS 语音嘴型联动",
     "type": "bool",

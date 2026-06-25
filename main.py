@@ -51,6 +51,7 @@ from .bilibili_live import (
 )
 from .l2d_mixin import Live2DMixin
 from .mouth_sync_mixin import MouthSyncMixin
+from .screenshot_mixin import ScreenshotNarrationMixin
 from .subtitle_mixin import SubtitleMixin
 
 # 默认配置
@@ -102,10 +103,16 @@ class SyntheticBiliLiveWakeEvent(AstrMessageEvent):
     "astrbot_plugin_live_stream_companion",
     "menglimi",
     "B 站直播弹幕读取、自动回应、Live2D 表情动作、OBS 字幕和 TTS 嘴型联动",
-    "1.6.2",
+    "1.6.3",
     "https://github.com/menglimi/astrbot_plugin_live_stream_companion",
 )
-class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
+class VTubeStudioPlugin(
+    SubtitleMixin,
+    MouthSyncMixin,
+    Live2DMixin,
+    ScreenshotNarrationMixin,
+    Star,
+):
     """直播陪伴与 Live2D 演出控制插件"""
 
     def __init__(self, context: Context, config: AstrBotConfig = None):
@@ -153,6 +160,9 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
         self._warned_bili_blivedm_fallback = False
         self.page_api = None
         self._register_page_api_if_available()
+
+        # 截图解说子模块状态
+        self._screenshot_narration_state_init()
 
         self.vts = VTSClient(
             host=self._manual_host or DEFAULT_HOST,
@@ -204,6 +214,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             await self._start_subtitle_server_if_enabled()
             await self._ensure_bili_area_cache()
             self._start_private_companion_proactive_registration()
+            self._start_screenshot_narration_loop()
 
             if self._is_bili_live_enabled() and self.config.get(
                 "bili_live_auto_start", True
@@ -237,6 +248,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             self._unregister_private_companion_proactive_abilities()
             await self._stop_bili_live()
             await self._stop_subtitle_server()
+            await self._stop_screenshot_narration_loop()
             await self.vts.disconnect()
             logger.info("[VTS] 插件已卸载，VTS 连接已关闭")
         except Exception as e:
@@ -2323,6 +2335,7 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             self._build_bili_live_continuity_context(events),
             self._build_live_stream_memory_context(events),
             self._build_private_companion_live_context(events),
+            self._build_screenshot_narration_context(events),
         ]
         return "\n\n".join(part for part in parts if part)
 
@@ -3696,6 +3709,37 @@ class VTubeStudioPlugin(SubtitleMixin, MouthSyncMixin, Live2DMixin, Star):
             "已将当前聊天绑定为 B站直播自动回应会话。开启 bili_live_auto_reply_enabled 后，"
             "直播弹幕会以 AstrBot 原生消息事件的方式触发 Bot 在这里回复。"
         )
+
+    @filter.command("screenshot_narration_status")
+    async def cmd_screenshot_narration_status(self, event: AstrMessageEvent):
+        """查看直播画面截图解说子模块状态。"""
+        yield event.plain_result(self._screenshot_narration_status_text())
+
+    @filter.command("screenshot_narration_test")
+    async def cmd_screenshot_narration_test(self, event: AstrMessageEvent):
+        """手动触发一次直播画面截图解说，便于调试和演示。"""
+        yield event.plain_result("正在截取当前显示器并调用视觉 LLM 生成解说，请稍候……")
+        result = await self._trigger_screenshot_narration_now()
+        if not result:
+            detail = self._screenshot_narration_last_error or "未知原因"
+            yield event.plain_result(f"截图解说失败：{detail}")
+            return
+        scene = str(result.get("scene_description") or "").strip()
+        candidates = [
+            str(item).strip()
+            for item in (result.get("narration_candidates") or [])
+            if str(item or "").strip()
+        ]
+        lines = ["截图解说已生成："]
+        if scene:
+            lines.append(f"- 场景描述：{scene}")
+        if candidates:
+            lines.append("- 解说候选：")
+            for idx, item in enumerate(candidates, 1):
+                lines.append(f"  {idx}. {item}")
+        if len(lines) == 1:
+            lines.append("（LLM 未返回有效内容）")
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("bili_live_probe")
     async def cmd_bili_live_probe(self, event: AstrMessageEvent, room_id: int = 0):

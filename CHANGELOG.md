@@ -1,5 +1,16 @@
 # 更改记录
 
+## 1.6.3
+
+- 新增「直播画面截图解说」子模块（`screenshot_mixin.py`）：
+  - 周期性截取当前显示器画面，下采样后发送给视觉 LLM，生成「场景描述 + 解说候选」并缓存到内存 deque。
+  - 通过 `_build_screenshot_narration_context` 注入到直播自动回应的辅助上下文，让 Inory 能自然评价画面，对接人设里预留的「画面评价」接入点。
+  - 视觉 LLM 复用 `bili_live_auto_reply_session_id` 的 Provider，可通过新增 `screenshot_narration_session_id` 单独绑定支持图片的模型；调用失败时静默丢弃这一帧。
+  - 直播监听未运行时自动跳过周期截图，避免无人直播时白烧 token。
+  - 新增配置项：`screenshot_narration_enabled`、`screenshot_narration_interval_seconds`、`screenshot_narration_initial_delay_seconds`、`screenshot_narration_monitor_index`、`screenshot_narration_max_image_width`、`screenshot_narration_jpeg_quality`、`screenshot_narration_session_id`、`screenshot_narration_system_prompt`、`screenshot_narration_candidate_count`、`screenshot_narration_max_history`、`screenshot_narration_context_enabled`、`screenshot_narration_context_max_age_seconds`。
+  - 新增命令：`/screenshot_narration_status` 查看状态，`/screenshot_narration_test` 手动触发一次截图解说。
+  - `requirements.txt` 新增 `mss`、`Pillow` 依赖。
+
 ## 1.6.2
 
 - 修复普通 QQ 消息仍可能进入 OBS 打字机字幕的问题。
