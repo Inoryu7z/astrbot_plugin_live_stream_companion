@@ -42,6 +42,8 @@ class ScreenshotNarrationMixin:
         self._screenshot_narration_running = False
         self._screenshot_narration_in_flight = False
         self._screenshot_narration_last_attempt_at = 0.0
+        # 已生成但尚未确认消费/清理的截图文件路径，防止 asyncio.to_thread 被取消时泄漏
+        self._screenshot_narration_pending_paths: list[str] = []
         history_size = max(
             2,
             self._safe_parse_int(
@@ -87,6 +89,14 @@ class ScreenshotNarrationMixin:
             except Exception as e:
                 logger.debug(f"[截图解说] 停止后台任务时出现异常: {e}")
         self._screenshot_narration_task = None
+        # 兜底清理可能因取消而残留的截图文件
+        self._screenshot_narration_cleanup_pending_paths()
+
+    def _screenshot_narration_cleanup_pending_paths(self) -> None:
+        """清理所有 pending 截图文件。"""
+        paths = getattr(self, "_screenshot_narration_pending_paths", []) or []
+        for path in list(paths):
+            self._screenshot_narration_cleanup_path(path)
 
     # ------------------------------------------------------------------ #
     #  主循环
@@ -137,27 +147,28 @@ class ScreenshotNarrationMixin:
     async def _run_one_screenshot_narration_cycle(self, *, source: str = "loop") -> Optional[dict[str, Any]]:
         """执行一次完整的截图->LLM解说->缓存流程，返回解说 dict。"""
         if self._screenshot_narration_in_flight:
-            logger.debug("[截图解说] 上一帧仍在处理中，跳过本次触发")
+            self._screenshot_narration_last_error = "上一帧仍在处理中，跳过本次触发"
+            logger.debug(self._screenshot_narration_last_error)
             return None
         self._screenshot_narration_in_flight = True
         self._screenshot_narration_last_attempt_at = time.time()
+        captured_path: Optional[str] = None
         try:
-            image_path = await asyncio.to_thread(self._capture_screenshot_to_file)
-            if not image_path:
+            captured_path = await asyncio.to_thread(self._capture_screenshot_to_file)
+            if not captured_path:
                 self._screenshot_narration_last_error = "截屏失败或未捕获到画面"
                 return None
             try:
-                narration = await self._generate_screenshot_narration(image_path)
+                narration = await self._generate_screenshot_narration(captured_path)
             finally:
-                # 用完即删，避免临时目录膨胀
-                try:
-                    Path(image_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+                # 用完即删，避免临时目录膨胀；同时从 pending 列表移除
+                self._screenshot_narration_cleanup_path(captured_path)
+                captured_path = None
             if not narration:
                 self._screenshot_narration_last_error = "LLM 未返回有效解说"
                 return None
-            narration["ts"] = time.time()
+            # ts 用截图发起时刻，更接近画面真实时间
+            narration["ts"] = self._screenshot_narration_last_attempt_at
             narration["source"] = source
             self._screenshot_narration_history.append(narration)
             self._screenshot_narration_last_error = ""
@@ -168,8 +179,25 @@ class ScreenshotNarrationMixin:
                 len(narration.get("narration_candidates") or []),
             )
             return narration
+        except asyncio.CancelledError:
+            # 被取消时 captured_path 可能已生成但 finally 未执行，兜底清理
+            if captured_path:
+                self._screenshot_narration_cleanup_path(captured_path)
+            raise
         finally:
             self._screenshot_narration_in_flight = False
+
+    def _screenshot_narration_cleanup_path(self, path: str) -> None:
+        """删除指定截图文件并从 pending 列表移除。"""
+        try:
+            Path(path).unlink(missing_ok=True)
+        except Exception:
+            pass
+        try:
+            if path in self._screenshot_narration_pending_paths:
+                self._screenshot_narration_pending_paths.remove(path)
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ #
     #  截屏
@@ -186,6 +214,12 @@ class ScreenshotNarrationMixin:
             )
             logger.warning(self._screenshot_narration_last_error)
             return None
+
+        # Pillow 10+ 用 Image.Resampling.LANCZOS，老版本用 Image.LANCZOS
+        try:
+            resample = Image.Resampling.LANCZOS  # type: ignore[attr-defined]
+        except AttributeError:
+            resample = Image.LANCZOS  # type: ignore[attr-defined]
 
         monitor_index = max(
             0,
@@ -234,37 +268,40 @@ class ScreenshotNarrationMixin:
         try:
             if img.width > max_width:
                 new_height = max(1, int(img.height * (max_width / img.width)))
-                img = img.resize((max_width, new_height), Image.LANCZOS)
+                img = img.resize((max_width, new_height), resample)
         except Exception as e:
             logger.debug(f"[截图解说] 下采样失败，使用原图: {e}")
 
-        # 保存为 JPEG
-        out_dir = Path(self._screenshot_narration_temp_dir())
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"shot_{uuid.uuid4().hex}.jpg"
+        # 保存为 JPEG（mkdir 也包进异常保护，避免目录创建失败让错误信息不友好）
         try:
+            out_dir = Path(self._screenshot_narration_temp_dir())
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"shot_{uuid.uuid4().hex}.jpg"
             img.convert("RGB").save(out_path, format="JPEG", quality=jpeg_quality)
         except Exception as e:
             self._screenshot_narration_last_error = f"截图保存失败: {e}"
             logger.warning(f"[截图解说] {self._screenshot_narration_last_error}")
             return None
+        # 登记到 pending 列表，防止 asyncio.to_thread 被取消时泄漏文件
+        try:
+            self._screenshot_narration_pending_paths.append(str(out_path))
+        except AttributeError:
+            self._screenshot_narration_pending_paths = [str(out_path)]
         return str(out_path)
 
     def _screenshot_narration_temp_dir(self) -> str:
         """返回截图临时目录。优先放在插件数据目录下，便于排查。"""
+        data_dir = ""
         try:
-            base = Path(self.config.get("_data_dir") or "") if isinstance(
-                self.config, dict
-            ) else Path("")
+            if isinstance(self.config, dict):
+                data_dir = str(self.config.get("_data_dir") or "").strip()
         except Exception:
-            base = Path("")
-        if not base or not str(base).strip():
-            import tempfile
+            data_dir = ""
+        if data_dir:
+            return str(Path(data_dir) / "screenshots")
+        import tempfile
 
-            base = Path(tempfile.gettempdir()) / "live_stream_companion_screenshots"
-        else:
-            base = Path(base) / "screenshots"
-        return str(base)
+        return str(Path(tempfile.gettempdir()) / "live_stream_companion_screenshots")
 
     # ------------------------------------------------------------------ #
     #  视觉 LLM 调用
@@ -311,16 +348,31 @@ class ScreenshotNarrationMixin:
                 image_urls=[image_path],
                 persist=False,
             )
-        except TypeError:
-            # 老版本 provider 可能不支持 image_urls 关键字
+        except TypeError as e:
+            # provider.text_chat 不接受 image_urls 关键字时降级为纯文本调用
+            # 只在参数签名确实不支持时降级，避免掩盖 provider 内部真实 TypeError
+            import inspect
+            sig = inspect.signature(provider.text_chat)
+            params = sig.parameters
+            if "image_urls" in params or any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            ):
+                # 签名支持却仍抛 TypeError，说明是 provider 内部 bug，不降级
+                self._screenshot_narration_last_error = f"视觉 LLM 调用失败: {e}"
+                logger.warning(f"[截图解说] {self._screenshot_narration_last_error}")
+                return None
+            logger.warning(
+                "[截图解说] 当前 Provider 不支持 image_urls 参数，降级为纯文本调用（将丧失视觉能力）: %s",
+                e,
+            )
             try:
                 response = await provider.text_chat(
                     prompt=prompt,
                     system_prompt=system_prompt,
                     persist=False,
                 )
-            except Exception as e:
-                self._screenshot_narration_last_error = f"LLM 调用失败: {e}"
+            except Exception as e2:
+                self._screenshot_narration_last_error = f"LLM 调用失败: {e2}"
                 logger.warning(f"[截图解说] {self._screenshot_narration_last_error}")
                 return None
         except Exception as e:
@@ -382,20 +434,26 @@ class ScreenshotNarrationMixin:
         if not raw:
             return None
 
-        # 抽取 JSON 块（容忍 ```json 包裹）
-        json_text = raw
-        fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.IGNORECASE | re.DOTALL)
-        if fence:
-            json_text = fence.group(1)
-        else:
-            # 找第一个 { 到最后一个 }
-            first = raw.find("{")
-            last = raw.rfind("}")
-            if 0 <= first < last:
-                json_text = raw[first : last + 1]
+        # 候选 JSON 文本片段，按优先级尝试
+        candidates_text: list[str] = []
+        # 1. ```json ... ``` 代码块（贪心匹配，支持嵌套对象）
+        for fence in re.finditer(
+            r"```(?:json)?\s*(\{.*\})\s*```", raw, re.IGNORECASE | re.DOTALL
+        ):
+            candidates_text.append(fence.group(1))
+        # 2. 首尾大括号之间的内容
+        first = raw.find("{")
+        last = raw.rfind("}")
+        if 0 <= first < last:
+            candidates_text.append(raw[first : last + 1])
+        # 3. 原文
+        candidates_text.append(raw)
 
-        try:
-            data = json.loads(json_text)
+        for json_text in candidates_text:
+            try:
+                data = json.loads(json_text)
+            except Exception:
+                continue
             if isinstance(data, dict):
                 scene = str(data.get("scene_description") or "").strip()
                 candidates_raw = data.get("narration_candidates") or []
@@ -403,19 +461,17 @@ class ScreenshotNarrationMixin:
                     candidates_raw = [candidates_raw]
                 if not isinstance(candidates_raw, list):
                     candidates_raw = []
-                candidates = [
+                cand = [
                     str(item).strip()
                     for item in candidates_raw
                     if str(item or "").strip()
                 ]
-                candidates = candidates[:candidate_count]
-                if scene or candidates:
+                cand = cand[:candidate_count]
+                if scene or cand:
                     return {
                         "scene_description": scene,
-                        "narration_candidates": candidates,
+                        "narration_candidates": cand,
                     }
-        except Exception as e:
-            logger.debug(f"[截图解说] JSON 解析失败，降级纯文本: {e}")
 
         # 降级：把整段文本当作 scene_description，候选为空
         scene = raw.replace("```", "").strip()
