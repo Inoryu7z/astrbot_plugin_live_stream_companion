@@ -21,7 +21,7 @@ from astrbot.api.star import Star, Context, register
 from astrbot.api import llm_tool, AstrBotConfig
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api import logger
-from astrbot.api.message_components import Plain, Record
+from astrbot.api.message_components import Image, Plain, Record
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.agent.message import AssistantMessageSegment
 from astrbot.core.astr_main_agent import MainAgentBuildConfig, build_main_agent
@@ -103,7 +103,7 @@ class SyntheticBiliLiveWakeEvent(AstrMessageEvent):
     "astrbot_plugin_live_stream_companion",
     "menglimi",
     "B 站直播弹幕读取、自动回应、Live2D 表情动作、OBS 字幕和 TTS 嘴型联动",
-    "1.6.3",
+    "1.6.4",
     "https://github.com/menglimi/astrbot_plugin_live_stream_companion",
 )
 class VTubeStudioPlugin(
@@ -1197,12 +1197,20 @@ class VTubeStudioPlugin(
         auxiliary_context = self._build_bili_live_auxiliary_context(selected)
         if auxiliary_context:
             prompt += "\n\n" + auxiliary_context
-        response = await provider.text_chat(
-            prompt=prompt,
-            system_prompt=system_prompt,
-            session_id=f"{session_id}:bili_live_auto_reply",
-            persist=False,
-        )
+        # 弹幕回应时附带当前画面截图，让 LLM 不只看弹幕文本
+        reply_screenshot_path = await self._capture_screenshot_for_reply()
+        prompt += self._screenshot_reply_prompt_hint(bool(reply_screenshot_path))
+        try:
+            response = await provider.text_chat(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                session_id=f"{session_id}:bili_live_auto_reply",
+                persist=False,
+                image_urls=[reply_screenshot_path] if reply_screenshot_path else [],
+            )
+        finally:
+            if reply_screenshot_path:
+                self._screenshot_narration_cleanup_path(reply_screenshot_path)
         reply_text = self._extract_provider_text(response)
         reply_text = self._clean_auto_reply_text(reply_text)
         if not reply_text:
@@ -1259,6 +1267,9 @@ class VTubeStudioPlugin(
         auxiliary_context = self._build_bili_live_auxiliary_context(events[-max_events:])
         if auxiliary_context:
             prompt += "\n\n" + auxiliary_context
+        # 弹幕回应时附带当前画面截图
+        reply_screenshot_path = await self._capture_screenshot_for_reply()
+        prompt += self._screenshot_reply_prompt_hint(bool(reply_screenshot_path))
         if self.config.get("bili_live_auto_reply_force_full_tts", True):
             prompt += (
                 "\n\n请只输出普通文本回复，不要调用工具，不要写 <record>、<voice>、"
@@ -1270,7 +1281,11 @@ class VTubeStudioPlugin(
             evt.message_obj = copy.copy(self._bili_reply_event_template.message_obj)
             evt._extras = dict(self._bili_reply_event_template.get_extra())
             evt.clear_result()
-            evt.message_obj.message = [Plain(prompt)]
+            # 框架会自动从 message 组件中提取 Image 并加入 ProviderRequest.image_urls
+            msg_components: list[Any] = [Plain(prompt)]
+            if reply_screenshot_path:
+                msg_components.append(Image.fromFileSystem(reply_screenshot_path))
+            evt.message_obj.message = msg_components
             evt.message_obj.message_str = prompt
             evt.message_str = prompt
             evt.is_at_or_wake_command = True
@@ -1283,8 +1298,16 @@ class VTubeStudioPlugin(
             logger.info(
                 f"[B站直播] 已投递原生自动回应事件 -> {session_id}: {len(events[-max_events:])} 条事件"
             )
+            # 截图文件由框架异步处理，登记到 pending 列表，由后续周期/停止时清理
+            if reply_screenshot_path:
+                try:
+                    self._screenshot_narration_pending_paths.append(reply_screenshot_path)
+                except AttributeError:
+                    self._screenshot_narration_pending_paths = [reply_screenshot_path]
         except Exception as e:
             logger.warning(f"[B站直播] 投递原生自动回应事件失败: {e}")
+            if reply_screenshot_path:
+                self._screenshot_narration_cleanup_path(reply_screenshot_path)
 
     async def _reply_to_bili_live_events_via_framework(
         self, events: list[LiveDanmakuEvent], session_id: str
@@ -1337,6 +1360,9 @@ class VTubeStudioPlugin(
         auxiliary_context = self._build_bili_live_auxiliary_context(events[-max_events:])
         if auxiliary_context:
             prompt += "\n\n" + auxiliary_context
+        # 弹幕回应时附带当前画面截图
+        reply_screenshot_path = await self._capture_screenshot_for_reply()
+        prompt += self._screenshot_reply_prompt_hint(bool(reply_screenshot_path))
         if self.config.get("bili_live_auto_reply_force_full_tts", True):
             prompt += (
                 "\n\n请只输出普通文本回复，不要调用工具，不要写 <record>、<voice>、"
@@ -1366,6 +1392,8 @@ class VTubeStudioPlugin(
                 conversation=conv,
                 session_id=session_id,
             )
+            if reply_screenshot_path:
+                req.image_urls = [reply_screenshot_path]
             t_build = time.perf_counter()
             result = await build_main_agent(
                 event=synthetic_event,
@@ -1423,6 +1451,10 @@ class VTubeStudioPlugin(
         except Exception as e:
             logger.warning(f"[B站直播] 框架式原生自动回应失败: {e}")
             return False
+        finally:
+            # 框架链路 LLM 调用已结束，清理截图临时文件
+            if reply_screenshot_path:
+                self._screenshot_narration_cleanup_path(reply_screenshot_path)
 
     async def _decorate_bili_live_reply_chain(
         self,

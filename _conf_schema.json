@@ -681,6 +681,28 @@
     },
     "default": 8
   },
+  "screenshot_narration_burst_count": {
+    "description": "连续截图张数",
+    "type": "int",
+    "hint": "每次截图解说连续截取多少张画面一并发给 LLM，让模型看到连续动作。默认 3 张，1-10 张。设为 1 即回退到单张截图",
+    "slider": {
+      "min": 1,
+      "max": 10,
+      "step": 1
+    },
+    "default": 3
+  },
+  "screenshot_narration_burst_interval_seconds": {
+    "description": "连续截图间隔",
+    "type": "float",
+    "hint": "连续截图时每张之间的间隔秒数。默认 1 秒，即 3 张约覆盖 2 秒内的画面变化",
+    "slider": {
+      "min": 0,
+      "max": 30,
+      "step": 0.5
+    },
+    "default": 1
+  },
   "screenshot_narration_monitor_index": {
     "description": "显示器索引",
     "type": "int",
@@ -764,6 +786,12 @@
       "step": 10
     },
     "default": 180
+  },
+  "screenshot_narration_attach_to_reply_enabled": {
+    "description": "弹幕回应附带截图",
+    "type": "bool",
+    "hint": "开启后，直播弹幕自动回应时会截取一张当前画面一并发给 LLM，避免模型只读弹幕文本而不了解画面。要求 screenshot_narration_enabled 也为开启状态。截图失败会静默退化为纯文本回应",
+    "default": true
   },
   "mouth_sync_enabled": {
     "description": "启用 TTS 语音嘴型联动",

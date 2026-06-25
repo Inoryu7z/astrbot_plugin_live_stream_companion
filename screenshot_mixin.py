@@ -152,24 +152,29 @@ class ScreenshotNarrationMixin:
             return None
         self._screenshot_narration_in_flight = True
         self._screenshot_narration_last_attempt_at = time.time()
-        captured_path: Optional[str] = None
+        captured_paths: list[str] = []
         try:
-            captured_path = await asyncio.to_thread(self._capture_screenshot_to_file)
-            if not captured_path:
+            # 连续截 N 张
+            captured_paths = await self._capture_screenshot_burst()
+            if not captured_paths:
                 self._screenshot_narration_last_error = "截屏失败或未捕获到画面"
                 return None
+            # 在清理前先记录帧数，finally 块会清空 captured_paths
+            frame_count = len(captured_paths)
             try:
-                narration = await self._generate_screenshot_narration(captured_path)
+                narration = await self._generate_screenshot_narration(captured_paths)
             finally:
-                # 用完即删，避免临时目录膨胀；同时从 pending 列表移除
-                self._screenshot_narration_cleanup_path(captured_path)
-                captured_path = None
+                # 用完即删，避免临时目录膨胀
+                for path in captured_paths:
+                    self._screenshot_narration_cleanup_path(path)
+                captured_paths = []
             if not narration:
                 self._screenshot_narration_last_error = "LLM 未返回有效解说"
                 return None
             # ts 用截图发起时刻，更接近画面真实时间
             narration["ts"] = self._screenshot_narration_last_attempt_at
             narration["source"] = source
+            narration["frame_count"] = max(1, frame_count)
             self._screenshot_narration_history.append(narration)
             self._screenshot_narration_last_error = ""
             logger.info(
@@ -180,9 +185,9 @@ class ScreenshotNarrationMixin:
             )
             return narration
         except asyncio.CancelledError:
-            # 被取消时 captured_path 可能已生成但 finally 未执行，兜底清理
-            if captured_path:
-                self._screenshot_narration_cleanup_path(captured_path)
+            # 被取消时兜底清理已生成的截图文件
+            for path in captured_paths:
+                self._screenshot_narration_cleanup_path(path)
             raise
         finally:
             self._screenshot_narration_in_flight = False
@@ -202,6 +207,49 @@ class ScreenshotNarrationMixin:
     # ------------------------------------------------------------------ #
     #  截屏
     # ------------------------------------------------------------------ #
+
+    async def _capture_screenshot_burst(self) -> list[str]:
+        """连续截取 N 张画面（默认 3 张，间隔默认 1 秒），返回文件路径列表。
+
+        用于让视觉 LLM 看到一段连续画面，更精准判断直播当前在做什么。
+        单张截图失败不会中断整组，只要至少有一张成功就返回非空列表。
+        """
+        count = max(
+            1,
+            min(
+                10,
+                self._safe_parse_int(
+                    self.config.get("screenshot_narration_burst_count"), 3
+                ),
+            ),
+        )
+        interval = max(
+            0.0,
+            min(
+                30.0,
+                self._safe_parse_float(
+                    self.config.get("screenshot_narration_burst_interval_seconds"), 1.0
+                ),
+            ),
+        )
+        paths: list[str] = []
+        for i in range(count):
+            try:
+                path = await asyncio.to_thread(self._capture_screenshot_to_file)
+            except asyncio.CancelledError:
+                # 被取消时清理已捕获的图片
+                for p in paths:
+                    self._screenshot_narration_cleanup_path(p)
+                raise
+            except Exception as e:
+                logger.debug(f"[截图解说] 第 {i + 1}/{count} 张截图失败: {e}")
+                path = None
+            if path:
+                paths.append(path)
+            # 最后一张不需要等待
+            if i < count - 1 and interval > 0:
+                await asyncio.sleep(interval)
+        return paths
 
     def _capture_screenshot_to_file(self) -> Optional[str]:
         """截取当前显示器，下采样并保存为 JPEG，返回文件路径。"""
@@ -307,8 +355,14 @@ class ScreenshotNarrationMixin:
     #  视觉 LLM 调用
     # ------------------------------------------------------------------ #
 
-    async def _generate_screenshot_narration(self, image_path: str) -> Optional[dict[str, Any]]:
-        """调用视觉 LLM 生成场景描述 + 解说候选，返回解析后的 dict。"""
+    async def _generate_screenshot_narration(self, image_paths: list[str]) -> Optional[dict[str, Any]]:
+        """调用视觉 LLM 生成场景描述 + 解说候选，返回解析后的 dict。
+
+        image_paths 为按时间顺序的连续截图路径列表（1-10 张），LLM 可借此理解
+        当前直播画面正在发生的连续动作，而不仅是一帧静态画面。
+        """
+        if not image_paths:
+            return None
         provider = await self._get_screenshot_narration_provider()
         if provider is None:
             self._screenshot_narration_last_error = "未找到可用 LLM Provider"
@@ -328,24 +382,41 @@ class ScreenshotNarrationMixin:
                 ),
             ),
         )
-        prompt = (
-            "请分析这张直播画面截图，严格按以下 JSON 格式输出，不要输出 JSON 以外的内容、不要包裹在 ``` 代码块里：\n"
-            "{\n"
-            '  "scene_description": "对画面内容的简短客观描述（20-50字），包括游戏/应用类型、可见关键元素、大致状态",\n'
-            '  "narration_candidates": ["2-3条适合直播陪聊语气的简短解说候选，每条15-40字"]\n'
-            "}\n\n"
-            "要求：\n"
-            "- 客观描述画面里能看到的元素，不要编造画面外的细节\n"
-            f"- 解说候选给 {candidate_count} 条，自然口语化，像主播现场接话\n"
-            "- 每条解说独立可用，不依赖前文，不要重复同一意思\n"
-            "- 不要逐字读出 JSON 字段名，按 JSON 结构输出即可\n"
-        )
+        frame_count = len(image_paths)
+        if frame_count > 1:
+            prompt = (
+                f"请分析这组连续的直播画面截图（共 {frame_count} 张，按时间顺序排列），"
+                "严格按以下 JSON 格式输出，不要输出 JSON 以外的内容、不要包裹在 ``` 代码块里：\n"
+                "{\n"
+                '  "scene_description": "对画面内容的简短客观描述（20-50字），包括游戏/应用类型、可见关键元素、大致状态；可结合多帧判断正在发生的动作",\n'
+                '  "narration_candidates": ["2-3条适合直播陪聊语气的简短解说候选，每条15-40字"]\n'
+                "}\n\n"
+                "要求：\n"
+                "- 这是一组连续截图，按顺序反映了几秒内的画面变化，请结合多帧判断现在到底在做什么\n"
+                "- 客观描述画面里能看到的元素，不要编造画面外的细节\n"
+                f"- 解说候选给 {candidate_count} 条，自然口语化，像主播现场接话\n"
+                "- 每条解说独立可用，不依赖前文，不要重复同一意思\n"
+                "- 不要逐字读出 JSON 字段名，按 JSON 结构输出即可\n"
+            )
+        else:
+            prompt = (
+                "请分析这张直播画面截图，严格按以下 JSON 格式输出，不要输出 JSON 以外的内容、不要包裹在 ``` 代码块里：\n"
+                "{\n"
+                '  "scene_description": "对画面内容的简短客观描述（20-50字），包括游戏/应用类型、可见关键元素、大致状态",\n'
+                '  "narration_candidates": ["2-3条适合直播陪聊语气的简短解说候选，每条15-40字"]\n'
+                "}\n\n"
+                "要求：\n"
+                "- 客观描述画面里能看到的元素，不要编造画面外的细节\n"
+                f"- 解说候选给 {candidate_count} 条，自然口语化，像主播现场接话\n"
+                "- 每条解说独立可用，不依赖前文，不要重复同一意思\n"
+                "- 不要逐字读出 JSON 字段名，按 JSON 结构输出即可\n"
+            )
 
         try:
             response = await provider.text_chat(
                 prompt=prompt,
                 system_prompt=system_prompt,
-                image_urls=[image_path],
+                image_urls=image_paths,
                 persist=False,
             )
         except TypeError as e:
@@ -547,6 +618,39 @@ class ScreenshotNarrationMixin:
         )
 
     # ------------------------------------------------------------------ #
+    #  弹幕回应时附带截图
+    # ------------------------------------------------------------------ #
+
+    async def _capture_screenshot_for_reply(self) -> Optional[str]:
+        """为弹幕自动回应截取一张当前画面，返回文件路径（失败/未启用返回 None）。
+
+        与周期截图解说的 burst 不同，这里只截一张，优先保证回应速度。
+        截图失败不会阻断弹幕回应，只是退化为纯文本。
+        """
+        if not self.config.get("screenshot_narration_attach_to_reply_enabled", True):
+            return None
+        if not self.config.get("screenshot_narration_enabled", False):
+            # 截图解说总开关关闭时不截图，避免用户只想要弹幕附图却忘了开总开关时静默失败
+            return None
+        try:
+            path = await asyncio.to_thread(self._capture_screenshot_to_file)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.debug(f"[截图解说] 弹幕回应截图失败: {e}")
+            return None
+        return path
+
+    def _screenshot_reply_prompt_hint(self, has_screenshot: bool) -> str:
+        """返回给弹幕回应 prompt 的截图附注文本。"""
+        if not has_screenshot:
+            return ""
+        return (
+            "\n\n[附件包含一张当前直播画面截图，可参考画面内容更精准地回应弹幕。"
+            "不要说自己看到了截图或描述截图过程，自然地把画面作为背景信息即可。]"
+        )
+
+    # ------------------------------------------------------------------ #
     #  手动触发与状态查询
     # ------------------------------------------------------------------ #
 
@@ -575,11 +679,19 @@ class ScreenshotNarrationMixin:
         interval = self._safe_parse_float(
             self.config.get("screenshot_narration_interval_seconds"), 60.0
         )
+        burst_count = self._safe_parse_int(
+            self.config.get("screenshot_narration_burst_count"), 3
+        )
+        burst_interval = self._safe_parse_float(
+            self.config.get("screenshot_narration_burst_interval_seconds"), 1.0
+        )
+        latest_frames = int(latest.get("frame_count", 1)) if latest else 0
         return (
             f"截图解说功能：{'已启用' if enabled else '未启用'}\n"
             f"后台循环：{'运行中' if running else '未运行'}\n"
             f"截图间隔：{interval:g} 秒\n"
+            f"连续截图：{burst_count} 张，间隔 {burst_interval:g} 秒\n"
             f"已缓存解说：{len(history)} 条\n"
-            f"最近一次：{latest_age}秒前，场景={latest_scene}，候选={latest_count} 条\n"
+            f"最近一次：{latest_age}秒前，帧数={latest_frames}，场景={latest_scene}，候选={latest_count} 条\n"
             f"最近错误：{last_error}"
         )

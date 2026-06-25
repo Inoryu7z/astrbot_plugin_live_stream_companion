@@ -1,5 +1,16 @@
 # 更改记录
 
+## 1.6.4
+
+- 截图解说子模块支持「连续多帧截图」：
+  - 新增配置 `screenshot_narration_burst_count`（默认 3 张）和 `screenshot_narration_burst_interval_seconds`（默认 1 秒），每次周期截图会连续截取 N 张一并发给视觉 LLM，让模型看到连续动作而非单帧静态画面，判断更精准。
+  - LLM 提示词会根据帧数自动切换：多帧时提示"按时间顺序分析连续画面变化"，单帧时保持原有行为。
+  - `/screenshot_narration_status` 状态输出新增连续截图张数、间隔和最近一次帧数。
+  - 修复 `frame_count` 在截图文件清理后才计算的 bug。
+- 弹幕自动回应现在会附带当前画面截图：
+  - 新增配置 `screenshot_narration_attach_to_reply_enabled`（默认开启），开启后三条自动回应路径（direct / native framework / native dispatch）都会在调用 LLM 前截取一张当前画面一并发送，避免模型只读弹幕文本而不了解直播画面。
+  - 截图失败会静默退化为纯文本回应，不阻断弹幕回复。direct 和 native framework 路径在 LLM 调用结束后立即清理临时文件；native dispatch 路径因事件异步处理，临时文件登记到 pending 列表由后续周期或停止时清理。
+
 ## 1.6.3
 
 - 新增「直播画面截图解说」子模块（`screenshot_mixin.py`）：
