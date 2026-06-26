@@ -644,7 +644,7 @@
   "bili_live_auto_reply_force_full_tts": {
     "description": "直播自动回应请求语音回复",
     "type": "bool",
-    "hint": "开启后，native 框架链路会向模型补充"本次回复需要包含语音消息"，并在完整框架链路中标记 TTS 插件强制语音",
+    "hint": "开启后，native 框架链路会向模型补充「本次回复需要包含语音消息」，并在完整框架链路中标记 TTS 插件强制语音",
     "default": true
   },
   "bili_live_local_audio_playback_enabled": {
