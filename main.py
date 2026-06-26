@@ -1563,6 +1563,139 @@ class VTubeStudioPlugin(
             logger.warning(f"[B站直播] 本地音频播放失败: {e}")
             return False
 
+    async def _speak_screenshot_narration_via_framework(
+        self, image_paths: list[str]
+    ) -> bool:
+        """直接把截图发给主 LLM，让它以 Inory 身份评价画面并说话。
+
+        替代原来的「视觉 LLM 生成解说 JSON → 取候选 → 说话」两步流程。
+        主 LLM 本身支持视觉，直接看图回复即可，省掉中间的解说生成调用。
+        """
+        if not image_paths:
+            return False
+        session_id = await self._get_bili_reply_session()
+        if not session_id:
+            logger.debug("[截图解说] 未绑定自动回应会话，跳过主动说话")
+            return False
+        try:
+            session = MessageSession.from_str(session_id)
+        except Exception as e:
+            logger.warning(f"[截图解说] 无法解析自动回应会话: {session_id} err={e}")
+            return False
+
+        started_at = time.perf_counter()
+        try:
+            t_conv = time.perf_counter()
+            curr_cid = await self.context.conversation_manager.get_curr_conversation_id(session_id)
+            if not curr_cid:
+                curr_cid = await self.context.conversation_manager.new_conversation(
+                    session_id,
+                    title="B站直播自动回应",
+                )
+            conv = await self.context.conversation_manager.get_conversation(session_id, curr_cid)
+            if not conv:
+                logger.warning(f"[截图解说] 自动回应会话无法读取对话: {session_id}")
+                return False
+            conv_elapsed = time.perf_counter() - t_conv
+        except Exception as e:
+            logger.warning(f"[截图解说] 读取自动回应会话对话失败: {e}")
+            return False
+
+        frame_count = len(image_paths)
+        if frame_count > 1:
+            prompt = (
+                f"【直播画面截图（共 {frame_count} 张连续画面）】\n"
+                "请像正在直播中一样自然评价当前画面。只输出要说的话，"
+                "不要描述自己看到了截图，不要描述处理过程。\n"
+                "要求：15-60 字，自然口语化。"
+            )
+        else:
+            prompt = (
+                "【直播画面截图】\n"
+                "请像正在直播中一样自然评价当前画面。只输出要说的话，"
+                "不要描述自己看到了截图，不要描述处理过程。\n"
+                "要求：15-60 字，自然口语化。"
+            )
+        if self.config.get("bili_live_auto_reply_force_full_tts", True):
+            prompt += (
+                "\n\n请只输出普通文本回复，不要调用工具，不要写 <record>、<voice>、"
+                "<语音>、<send_message_to_user> 等标签；如果需要语音，系统 TTS 插件会自动处理。"
+            )
+
+        try:
+            synthetic_event = SyntheticBiliLiveWakeEvent(
+                template_event=self._bili_reply_event_template,
+                context=self.context,
+                session=session,
+                message="bili_live_screenshot_narration_wakeup",
+            )
+            synthetic_event.set_extra("bili_live_auto_reply", True)
+            cfg = self.context.get_config(umo=session_id)
+            provider_settings = cfg.get("provider_settings", {}) if isinstance(cfg, dict) else {}
+            build_cfg = MainAgentBuildConfig(
+                tool_call_timeout=int(provider_settings.get("tool_call_timeout", 120) or 120),
+                llm_safety_mode=False,
+                streaming_response=False,
+            )
+            req = ProviderRequest(
+                prompt=prompt,
+                conversation=conv,
+                session_id=session_id,
+            )
+            req.image_urls = list(image_paths)
+            t_build = time.perf_counter()
+            result = await build_main_agent(
+                event=synthetic_event,
+                plugin_context=self.context,
+                config=build_cfg,
+                req=req,
+            )
+            if not result:
+                return False
+            build_elapsed = time.perf_counter() - t_build
+            runner = result.agent_runner
+            t_llm = time.perf_counter()
+            async for _ in runner.step_until_done(20):
+                pass
+            llm_elapsed = time.perf_counter() - t_llm
+            llm_resp = runner.get_final_llm_resp()
+            if not llm_resp or llm_resp.role != "assistant":
+                return False
+            reply_text = self._clean_auto_reply_text(llm_resp.completion_text or "")
+            if not reply_text:
+                return False
+            t_decorate = time.perf_counter()
+            force_voice = bool(self.config.get("bili_live_auto_reply_force_full_tts", True))
+            chain = await self._decorate_bili_live_reply_chain(
+                session_id,
+                [Plain(reply_text)],
+                force_voice=False,
+                skip_subtitle=force_voice,
+            )
+            decorate_elapsed = time.perf_counter() - t_decorate
+            chain = self._strip_tts_blocks_from_plain_chain(chain)
+            chain = self._ensure_visible_text_after_voice(chain, reply_text)
+            await self.context.send_message(session_id, MessageChain(chain))
+            if not force_voice:
+                await self._push_subtitle(reply_text, source="bili_live")
+            if force_voice:
+                asyncio.create_task(self._send_bili_live_tts_followup(session_id, reply_text))
+            total_elapsed = time.perf_counter() - started_at
+            logger.info(
+                "[截图解说] 主动说话(直连主LLM)耗时: total=%.2fs conv=%.2fs build=%.2fs llm=%.2fs decorate_tts=%.2fs session=%s",
+                total_elapsed,
+                conv_elapsed,
+                build_elapsed,
+                llm_elapsed,
+                decorate_elapsed,
+                session_id,
+            )
+            logger.info(f"[截图解说] 主动说话(直连主LLM) -> {session_id}: {reply_text}")
+            return True
+        except Exception as e:
+            logger.warning(f"[截图解说] 直连主LLM主动说话失败: {e}")
+            return False
+
     async def _send_bili_live_tts_followup(self, session_id: str, text: str) -> None:
         started_at = time.perf_counter()
         try:

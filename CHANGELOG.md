@@ -1,5 +1,14 @@
 # 更改记录
 
+## 1.6.7
+
+- 截图解说周期触发（source=loop）重构为「直连主 LLM」架构：
+  - 不再先调用视觉 LLM 生成解说 JSON（scene_description + narration_candidates），再取候选说话。
+  - 直接把截图发给主 LLM（和弹幕回应同一会话、同一 Provider、同一 Inory 人设），让它看到画面后直接回应。
+  - 省掉中间的解说生成调用（一次 LLM 调用 + JSON 解析），主 LLM 本身支持视觉，直接看图回复即可。
+  - 新增 `_speak_screenshot_narration_via_framework(image_paths)` 方法，复用弹幕回应的原生框架链路（build_main_agent + runner + TTS 装饰）。
+  - 手动触发（`/screenshot_narration_test`）保留老路，仍生成解说 JSON 用于调试和状态展示。
+
 ## 1.6.6
 
 - 新增「本地音频播放」配置项 `bili_live_local_audio_playback_enabled`（默认关闭）：

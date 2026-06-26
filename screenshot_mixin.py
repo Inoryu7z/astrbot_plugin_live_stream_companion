@@ -186,7 +186,12 @@ class ScreenshotNarrationMixin:
     # ------------------------------------------------------------------ #
 
     async def _run_one_screenshot_narration_cycle(self, *, source: str = "loop") -> Optional[dict[str, Any]]:
-        """执行一次完整的截图->LLM解说->缓存流程，返回解说 dict。"""
+        """执行一次截图并触发主动说话。
+
+        source="loop"（周期触发）：直接把截图发给主 LLM 让它以 Inory 身份评价画面并说话，
+        不再走「视觉 LLM 生成解说 JSON → 取候选 → 说话」的老路，省掉中间的解说生成调用。
+        source="manual"（手动触发）：保留老路，生成解说 JSON 用于调试和状态展示。
+        """
         if self._screenshot_narration_in_flight:
             self._screenshot_narration_last_error = "上一帧仍在处理中，跳过本次触发"
             logger.debug(self._screenshot_narration_last_error)
@@ -202,6 +207,28 @@ class ScreenshotNarrationMixin:
                 return None
             # 在清理前先记录帧数，finally 块会清空 captured_paths
             frame_count = len(captured_paths)
+
+            if source == "loop":
+                # 周期触发：直接把截图发给主 LLM，让它以 Inory 身份评价画面并说话
+                if self.config.get("screenshot_narration_auto_speak_enabled", True):
+                    try:
+                        await self._speak_screenshot_narration_via_framework(captured_paths)
+                    except Exception as e:
+                        logger.warning(f"[截图解说] 主动说话失败: {e}")
+                # 用完即删
+                for path in captured_paths:
+                    self._screenshot_narration_cleanup_path(path)
+                captured_paths = []
+                self._screenshot_narration_last_error = ""
+                return {
+                    "ts": self._screenshot_narration_last_attempt_at,
+                    "source": source,
+                    "frame_count": max(1, frame_count),
+                    "scene_description": "",
+                    "narration_candidates": [],
+                }
+
+            # 手动触发：保留老路（生成解说 JSON，用于调试和状态展示）
             try:
                 narration = await self._generate_screenshot_narration(captured_paths)
             finally:
@@ -224,14 +251,6 @@ class ScreenshotNarrationMixin:
                 (narration.get("scene_description") or "")[:60],
                 len(narration.get("narration_candidates") or []),
             )
-            # 主动说话：把解说候选作为 bot 消息发到绑定会话
-            if source == "loop" and self.config.get(
-                "screenshot_narration_auto_speak_enabled", True
-            ):
-                try:
-                    await self._speak_screenshot_narration(narration)
-                except Exception as e:
-                    logger.warning(f"[截图解说] 主动说话失败: {e}")
             return narration
         except asyncio.CancelledError:
             # 被取消时兜底清理已生成的截图文件
