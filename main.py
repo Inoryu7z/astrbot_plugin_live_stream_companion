@@ -1525,7 +1525,43 @@ class VTubeStudioPlugin(
             record_chain = await self._build_bili_live_tts_chain(session_id, spoken)
             if record_chain:
                 return record_chain
+        if bool(self.config.get("bili_live_local_audio_playback_enabled", False)):
+            if self._play_tts_audio_locally(processed_chain, session_id):
+                processed_chain = [c for c in processed_chain if not isinstance(c, Record)]
         return processed_chain
+
+    def _play_tts_audio_locally(self, chain: list[Any], session_id: str) -> bool:
+        """通过 winsound 在本机播放链中第一个 Record 组件的音频文件。
+
+        返回 True 表示播放已启动（应从链中移除 Record）。
+        返回 False 表示未播放或失败（应保留 Record 作为回退）。
+        """
+        if platform.system() != "Windows":
+            return False
+        record_comp = None
+        for comp in chain:
+            if isinstance(comp, Record):
+                record_comp = comp
+                break
+        if not record_comp:
+            return False
+        audio_path = getattr(record_comp, "file", None) or getattr(record_comp, "url", None)
+        if not audio_path:
+            return False
+        try:
+            audio_file = Path(audio_path)
+        except Exception:
+            return False
+        if not audio_file.exists():
+            return False
+        try:
+            import winsound
+            winsound.PlaySound(str(audio_file), winsound.SND_FILENAME | winsound.SND_ASYNC)
+            logger.info(f"[B站直播] 本地音频播放: {audio_file.name} session={session_id}")
+            return True
+        except Exception as e:
+            logger.warning(f"[B站直播] 本地音频播放失败: {e}")
+            return False
 
     async def _send_bili_live_tts_followup(self, session_id: str, text: str) -> None:
         started_at = time.perf_counter()
