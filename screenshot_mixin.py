@@ -42,6 +42,8 @@ class ScreenshotNarrationMixin:
         self._screenshot_narration_running = False
         self._screenshot_narration_in_flight = False
         self._screenshot_narration_last_attempt_at = 0.0
+        # 概率触发用：连续未触发的检查次数，达到上限后强制触发一次
+        self._screenshot_narration_silent_checks = 0
         # 已生成但尚未确认消费/清理的截图文件路径，防止 asyncio.to_thread 被取消时泄漏
         self._screenshot_narration_pending_paths: list[str] = []
         history_size = max(
@@ -103,7 +105,13 @@ class ScreenshotNarrationMixin:
     # ------------------------------------------------------------------ #
 
     async def _screenshot_narration_loop(self) -> None:
-        """周期截图并生成解说的主循环。"""
+        """周期截图并生成解说的主循环。
+
+        采用「概率 + 最大静默上限」触发：每次检查周期里，以 trigger_probability 的概率
+        触发截图解说；若连续 max_silent_checks 次未触发，则强制触发一次，避免长时间沉默。
+        这样既不会像固定间隔那样僵硬，也不会完全随机导致可能很久不说话。
+        """
+        import random
         try:
             # 启动时先等待一个间隔，避免和插件初始化挤在一起
             initial_delay = max(
@@ -115,10 +123,26 @@ class ScreenshotNarrationMixin:
             await asyncio.sleep(initial_delay)
 
             while self._screenshot_narration_running:
+                # 检查间隔（每次「摇骰子」的周期，不是实际触发间隔）
                 interval = max(
                     10.0,
                     self._safe_parse_float(
                         self.config.get("screenshot_narration_interval_seconds"), 60.0
+                    ),
+                )
+                probability = max(
+                    0.0,
+                    min(
+                        1.0,
+                        self._safe_parse_float(
+                            self.config.get("screenshot_narration_trigger_probability"), 0.3
+                        ),
+                    ),
+                )
+                max_silent = max(
+                    1,
+                    self._safe_parse_int(
+                        self.config.get("screenshot_narration_max_silent_checks"), 5
                     ),
                 )
                 # 只在直播监听运行时才自动截图，避免无人直播时白烧 token
@@ -126,13 +150,30 @@ class ScreenshotNarrationMixin:
                     getattr(self, "_is_bili_live_running", None)
                 ) else True
                 if live_running:
-                    try:
-                        await self._run_one_screenshot_narration_cycle(source="loop")
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception as e:
-                        logger.warning(f"[截图解说] 周期任务失败: {e}")
-                        self._screenshot_narration_last_error = str(e)
+                    # 判断是否触发：概率命中 或 已达到静默上限
+                    should_trigger = (
+                        self._screenshot_narration_silent_checks >= max_silent
+                        or random.random() < probability
+                    )
+                    if should_trigger:
+                        try:
+                            await self._run_one_screenshot_narration_cycle(source="loop")
+                            self._screenshot_narration_silent_checks = 0
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as e:
+                            logger.warning(f"[截图解说] 周期任务失败: {e}")
+                            self._screenshot_narration_last_error = str(e)
+                            # 失败也重置计数，避免失败后立即重试堆积
+                            self._screenshot_narration_silent_checks = 0
+                    else:
+                        self._screenshot_narration_silent_checks += 1
+                        logger.debug(
+                            "[截图解说] 概率未命中，跳过本轮（silent=%d/%d, p=%.2f）",
+                            self._screenshot_narration_silent_checks,
+                            max_silent,
+                            probability,
+                        )
                 else:
                     logger.debug("[截图解说] 直播监听未运行，跳过本轮自动截图")
                 await asyncio.sleep(interval)
@@ -183,6 +224,14 @@ class ScreenshotNarrationMixin:
                 (narration.get("scene_description") or "")[:60],
                 len(narration.get("narration_candidates") or []),
             )
+            # 主动说话：把解说候选作为 bot 消息发到绑定会话
+            if source == "loop" and self.config.get(
+                "screenshot_narration_auto_speak_enabled", True
+            ):
+                try:
+                    await self._speak_screenshot_narration(narration)
+                except Exception as e:
+                    logger.warning(f"[截图解说] 主动说话失败: {e}")
             return narration
         except asyncio.CancelledError:
             # 被取消时兜底清理已生成的截图文件
@@ -191,6 +240,45 @@ class ScreenshotNarrationMixin:
             raise
         finally:
             self._screenshot_narration_in_flight = False
+
+    async def _speak_screenshot_narration(self, narration: dict[str, Any]) -> None:
+        """把截图解说候选作为 bot 消息发到绑定会话，触发 OBS 字幕+口型+TTS。
+
+        只在周期触发（source=loop）时调用，手动触发不自动说话。
+        """
+        candidates = [
+            str(item).strip()
+            for item in (narration.get("narration_candidates") or [])
+            if str(item or "").strip()
+        ]
+        if not candidates:
+            return
+        session_id = await self._get_bili_reply_session()
+        if not session_id:
+            logger.debug("[截图解说] 未绑定自动回应会话，主动说话跳过")
+            return
+        # 取第一条候选作为主动说话内容（LLM 已按 Inory 风格生成）
+        speak_text = candidates[0]
+        try:
+            from astrbot.api.message_components import Plain
+            from astrbot.api.event import MessageChain
+        except ImportError:
+            return
+        force_voice = bool(self.config.get("bili_live_auto_reply_force_full_tts", True))
+        chain = await self._decorate_bili_live_reply_chain(
+            session_id,
+            [Plain(speak_text)],
+            force_voice=False,
+            skip_subtitle=force_voice,
+        )
+        chain = self._strip_tts_blocks_from_plain_chain(chain)
+        chain = self._ensure_visible_text_after_voice(chain, speak_text)
+        await self.context.send_message(session_id, MessageChain(chain))
+        if not force_voice:
+            await self._push_subtitle(speak_text, source="bili_live")
+        if force_voice:
+            asyncio.create_task(self._send_bili_live_tts_followup(session_id, speak_text))
+        logger.info(f"[截图解说] 主动说话 -> {session_id}: {speak_text}")
 
     def _screenshot_narration_cleanup_path(self, path: str) -> None:
         """删除指定截图文件并从 pending 列表移除。"""
@@ -458,18 +546,16 @@ class ScreenshotNarrationMixin:
         return self._parse_screenshot_narration_response(text, candidate_count)
 
     async def _get_screenshot_narration_provider(self):
-        """获取截图解说使用的 LLM Provider。"""
-        # 优先用专门配置的会话
-        dedicated_session = str(
-            self.config.get("screenshot_narration_session_id") or ""
-        ).strip()
+        """获取截图解说使用的 LLM Provider。
+
+        直接复用 astrbot 框架配置的主模型/回退模型链，不单独绑定视觉会话。
+        优先用自动回应会话的 provider（和弹幕回应同源），最后回退到全局默认。
+        """
         candidate_sessions: list[str] = []
-        if dedicated_session:
-            candidate_sessions.append(dedicated_session)
-        # 回退到自动回应会话
+        # 优先用自动回应会话（和弹幕回应共用同一 provider）
         try:
             auto_session = await self._get_bili_reply_session()
-            if auto_session and auto_session not in candidate_sessions:
+            if auto_session:
                 candidate_sessions.append(auto_session)
         except Exception:
             pass
@@ -488,9 +574,14 @@ class ScreenshotNarrationMixin:
 
     def _screenshot_narration_default_system_prompt(self) -> str:
         return (
-            "你是一个直播画面解说助手。根据用户提供的直播画面截图，"
-            "客观描述画面里能看到的内容，并给出几条自然口语化的解说候选，"
-            "供直播陪聊角色参考。不要编造画面外的细节。"
+            "你是 Inory，正在直播中的虚拟主播助手。根据提供的直播画面截图（可能是一组连续画面），"
+            "给出场景描述和解说候选。\n\n"
+            "性格：诚实、不分场合乱说话、偶尔自恋、被戳中会破防。\n\n"
+            "要求：\n"
+            "- 客观描述画面里能看到的元素，不要编造画面外的细节\n"
+            "- 解说候选自然口语化，像主播现场接话\n"
+            "- 可以用「你」称呼操作员（B站 ID「梦书桦」），但不要用「操作员」这个词\n"
+            "- 每条解说独立可用，不依赖前文"
         )
 
     # ------------------------------------------------------------------ #
@@ -679,6 +770,12 @@ class ScreenshotNarrationMixin:
         interval = self._safe_parse_float(
             self.config.get("screenshot_narration_interval_seconds"), 60.0
         )
+        probability = self._safe_parse_float(
+            self.config.get("screenshot_narration_trigger_probability"), 0.3
+        )
+        max_silent = self._safe_parse_int(
+            self.config.get("screenshot_narration_max_silent_checks"), 5
+        )
         burst_count = self._safe_parse_int(
             self.config.get("screenshot_narration_burst_count"), 3
         )
@@ -686,10 +783,12 @@ class ScreenshotNarrationMixin:
             self.config.get("screenshot_narration_burst_interval_seconds"), 1.0
         )
         latest_frames = int(latest.get("frame_count", 1)) if latest else 0
+        silent = getattr(self, "_screenshot_narration_silent_checks", 0)
         return (
             f"截图解说功能：{'已启用' if enabled else '未启用'}\n"
             f"后台循环：{'运行中' if running else '未运行'}\n"
-            f"截图间隔：{interval:g} 秒\n"
+            f"检查间隔：{interval:g} 秒，触发概率：{probability:g}，最大静默：{max_silent} 次\n"
+            f"当前静默计数：{silent}/{max_silent}\n"
             f"连续截图：{burst_count} 张，间隔 {burst_interval:g} 秒\n"
             f"已缓存解说：{len(history)} 条\n"
             f"最近一次：{latest_age}秒前，帧数={latest_frames}，场景={latest_scene}，候选={latest_count} 条\n"

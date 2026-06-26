@@ -1,5 +1,23 @@
 # 更改记录
 
+## 1.6.5
+
+- 截图解说触发机制从「固定间隔」改为「概率 + 最大静默上限」：
+  - 新增配置 `screenshot_narration_trigger_probability`（默认 0.3，即 30%）和 `screenshot_narration_max_silent_checks`（默认 5）。
+  - 每次检查周期里以该概率触发截图解说；连续 N 次概率未命中则强制触发一次，避免长时间沉默。
+  - `screenshot_narration_interval_seconds` 语义改为「检查间隔」（默认从 60 调整为 30 秒），不再是实际触发间隔。
+  - `/screenshot_narration_status` 状态输出新增触发概率、最大静默次数和当前静默计数。
+- 新增「主动说话」链路：截图解说生成后直接发声：
+  - 新增配置 `screenshot_narration_auto_speak_enabled`（默认开启）。
+  - 开启后，周期截图解说生成后会把第一条解说候选作为 bot 消息发到绑定会话，触发 OBS 字幕+口型+TTS，实现「无弹幕时 bot 主动评论画面」。
+  - 受概率触发和 max_silent_checks 控制频率，不需要额外冷却。手动 `/screenshot_narration_test` 不会触发主动说话。
+- 删除 `screenshot_narration_session_id` 配置项：
+  - 直接复用 astrbot 框架配置的主模型/回退模型链，不单独绑定视觉会话。Provider 获取逻辑简化为：自动回应会话 → 全局默认。
+- 两个 system prompt 默认值调整为 Inory 人设 v3.2 风格：
+  - `bili_live_auto_reply_system_prompt`：写入人设性格（诚实 + 不分场合乱说话 + 自恋 + 破防）、念弹幕格式（ID说："内容"——回应）、弹幕为主画面为辅、15-60 字约束。
+  - `screenshot_narration_system_prompt`：写入 Inory 风格的解说要求，称呼操作员用「你」不用「操作员」。
+  - 注意：默认值只对新安装生效。已有配置文件需手动改或删除旧值让框架回填默认。
+
 ## 1.6.4
 
 - 截图解说子模块支持「连续多帧截图」：

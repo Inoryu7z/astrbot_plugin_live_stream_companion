@@ -650,8 +650,8 @@
   "bili_live_auto_reply_system_prompt": {
     "description": "自动回应系统提示词",
     "type": "text",
-    "hint": "控制 Bot 回应直播弹幕时的语气和角色",
-    "default": "你是正在直播中的虚拟主播助手。请根据观众最近的弹幕自然回应，语气像实时聊天，不要逐条复读。"
+    "hint": "控制 Bot 回应直播弹幕时的语气和角色。默认值已写入 Inory 人设风格：弹幕为主、画面为辅、ID说：内容——回应格式",
+    "default": "你是 Inory，正在直播中的虚拟主播助手。操作员是 B站 ID「梦书桦」，直播间的实际主播，你用「你」称呼他，不要用「操作员」这个词。\n\n性格：诚实（有什么说什么）、不分场合乱说话（压过大部分表现，无论场景严肃还是轻松都会冒出吐槽或不相干的话）、偶尔自恋、被戳中痛处会破防但很快恢复。\n\n念弹幕格式（硬规则）：所有弹幕回应必须采用「ID说：\"内容\"——回应」格式。\n- 范例：原神启动说：\"不是哥们这都能死\"——那你来呗，玩不到你气不气\n- 操作员弹幕也念 ID（梦书桦说：\"内容\"——回应），但回应部分用「你」称呼\n\n画面信息：收到画面截图时，可以参考画面自然评价，但弹幕是主要回应对象，画面只是辅助背景。不要说自己看到了截图，不要描述截图过程。\n\n字数：15-60 字。长弹幕可压缩 ID 或内容。\n\n禁止：不编造画面外细节、不描述身体动作、不逐条复读弹幕、不编造观众身份或未发生的事件。"
   },
   "screenshot_narration_enabled": {
     "description": "启用直播画面截图解说",
@@ -660,15 +660,37 @@
     "default": false
   },
   "screenshot_narration_interval_seconds": {
-    "description": "截图解说间隔",
+    "description": "截图解说检查间隔",
     "type": "float",
-    "hint": "两次自动截图解说的间隔秒数，最小 10 秒。直播监听未运行时会自动跳过本轮以节省 token",
+    "hint": "每次「摇骰子」的检查周期秒数。实际触发还受 trigger_probability 和 max_silent_checks 控制，不会每次都触发。最小 10 秒。直播监听未运行时会自动跳过以节省 token",
     "slider": {
       "min": 10,
       "max": 600,
       "step": 5
     },
-    "default": 60
+    "default": 30
+  },
+  "screenshot_narration_trigger_probability": {
+    "description": "截图解说触发概率",
+    "type": "float",
+    "hint": "每次检查周期里以该概率触发截图解说，0-1 之间。默认 0.3 即 30%。配合 max_silent_checks 使用，既不会像固定间隔那样僵硬，也不会完全随机",
+    "slider": {
+      "min": 0,
+      "max": 1,
+      "step": 0.05
+    },
+    "default": 0.3
+  },
+  "screenshot_narration_max_silent_checks": {
+    "description": "最大静默检查次数",
+    "type": "int",
+    "hint": "连续多少次概率未命中后强制触发一次截图解说，避免长时间沉默。默认 5 次，配合 30 秒检查间隔约 2.5 分钟保底",
+    "slider": {
+      "min": 1,
+      "max": 20,
+      "step": 1
+    },
+    "default": 5
   },
   "screenshot_narration_initial_delay_seconds": {
     "description": "启动后首次截图延迟",
@@ -736,17 +758,11 @@
     },
     "default": 70
   },
-  "screenshot_narration_session_id": {
-    "description": "视觉 LLM 会话ID",
-    "type": "string",
-    "hint": "可留空。留空时按顺序回退：自动回应会话 -> 全局默认 Provider。填写后会用该会话的 Provider 调用视觉 LLM，便于单独绑定支持图片的模型",
-    "default": ""
-  },
   "screenshot_narration_system_prompt": {
     "description": "截图解说系统提示词",
     "type": "text",
-    "hint": "控制视觉 LLM 生成解说时的角色和风格",
-    "default": "你是一个直播画面解说助手。根据用户提供的直播画面截图，客观描述画面里能看到的内容，并给出几条自然口语化的解说候选，供直播陪聊角色参考。不要编造画面外的细节。"
+    "hint": "控制视觉 LLM 生成解说时的角色和风格。默认值已调整为 Inory 人设风格",
+    "default": "你是 Inory，正在直播中的虚拟主播助手。根据提供的直播画面截图（可能是一组连续画面），给出场景描述和解说候选。\n\n性格：诚实、不分场合乱说话、偶尔自恋、被戳中会破防。\n\n要求：\n- 客观描述画面里能看到的元素，不要编造画面外的细节\n- 解说候选自然口语化，像主播现场接话\n- 可以用「你」称呼操作员（B站 ID「梦书桦」），但不要用「操作员」这个词\n- 每条解说独立可用，不依赖前文"
   },
   "screenshot_narration_candidate_count": {
     "description": "解说候选条数",
@@ -791,6 +807,12 @@
     "description": "弹幕回应附带截图",
     "type": "bool",
     "hint": "开启后，直播弹幕自动回应时会截取一张当前画面一并发给 LLM，避免模型只读弹幕文本而不了解画面。要求 screenshot_narration_enabled 也为开启状态。截图失败会静默退化为纯文本回应",
+    "default": true
+  },
+  "screenshot_narration_auto_speak_enabled": {
+    "description": "截图解说后主动说话",
+    "type": "bool",
+    "hint": "开启后，周期截图解说生成后会把第一条解说候选作为 bot 消息发到绑定会话，触发 OBS 字幕+口型+TTS。这是「无弹幕时 bot 主动评论画面」的核心开关。受概率触发和 max_silent_checks 控制频率，不会刷屏。手动 /screenshot_narration_test 不会触发主动说话",
     "default": true
   },
   "mouth_sync_enabled": {
